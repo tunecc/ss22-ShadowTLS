@@ -209,7 +209,7 @@ generate_ss_links() {
     local ss_url="ss://${userinfo}@${server_ip}:${backend_port}?shadow-tls=${shadow_tls_base64}#SS-${server_ip}"
     
     echo -e "\n${GREEN}● Surge 配置${RESET}"
-    echo -e "${CYAN}ss-${server_ip} = ss, ${server_ip}, ${listen_port}, encrypt-method=${ssrust_method}, password=${ssrust_password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${stls_sni}, shadow-tls-version=3, udp-relay=true${RESET}"
+    echo -e "${CYAN}ss-${server_ip} = ss, ${server_ip}, ${listen_port}, encrypt-method=${ssrust_method}, password=${ssrust_password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${stls_sni}, shadow-tls-version=3, udp-relay=true, udp-port=${backend_port}${RESET}"
 
     # 保存配置到文件
     mkdir -p "$CONFIG_DIR"
@@ -229,7 +229,7 @@ ShadowTLS 配置:
 - 版本: 3
 
 Surge 配置:
-ss-${server_ip} = ss, ${server_ip}, ${listen_port}, encrypt-method=${ssrust_method}, password=${ssrust_password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${stls_sni}, shadow-tls-version=3, udp-relay=true
+ss-${server_ip} = ss, ${server_ip}, ${listen_port}, encrypt-method=${ssrust_method}, password=${ssrust_password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${stls_sni}, shadow-tls-version=3, udp-relay=true, udp-port=${backend_port}
 
 EOF
     echo -e "\n${GREEN}● 配置已保存至 ${CONFIG_DIR}/config.txt${RESET}"
