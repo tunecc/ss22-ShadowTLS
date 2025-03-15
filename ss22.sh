@@ -611,14 +611,14 @@ Status(){
 
 Update_Shell(){
 	echo -e "当前版本为 [ ${sh_ver} ]，开始检测最新版本..."
-	sh_new_ver=$(wget --no-check-certificate -qO- "https://raw.githubusercontent.com/tunecc/Shadowsocks-Rust/refs/heads/master/ss.sh"|grep 'sh_ver="'|awk -F "=" '{print $NF}'|sed 's/\"//g'|head -1)
+	sh_new_ver=$(wget --no-check-certificate -qO- "https://raw.githubusercontent.com/tunecc/ss22-ShadowTLS/refs/heads/main/ss22.sh"|grep 'sh_ver="'|awk -F "=" '{print $NF}'|sed 's/\"//g'|head -1)
 	[[ -z ${sh_new_ver} ]] && echo -e "${Error} 检测最新版本失败 !" && Start_Menu
 	if [[ ${sh_new_ver} != ${sh_ver} ]]; then
 		echo -e "发现新版本[ ${sh_new_ver} ]，是否更新？[Y/n]"
 		read -p "(默认：y)：" yn
 		[[ -z "${yn}" ]] && yn="y"
 		if [[ ${yn} == [Yy] ]]; then
-			wget -O ss.sh --no-check-certificate https://raw.githubusercontent.com/tunecc/Shadowsocks-Rust/refs/heads/master/ss.sh && chmod +x ss.sh
+			wget -O ss22.sh --no-check-certificate https://raw.githubusercontent.com/tunecc/ss22-ShadowTLS/refs/heads/main/ss22.sh && chmod +x ss22.sh
 			echo -e "脚本已更新为最新版本[ ${sh_new_ver} ]！"
 			echo -e "3s后执行新脚本"
             sleep 3s
@@ -677,7 +677,7 @@ Set_daily_restart(){
 
 install_shadowtls() {
     echo -e "${INFO} 开始下载 ShadowTLS 安装脚本..."
-    wget -N --no-check-certificate https://raw.githubusercontent.com/jinqians/ss-2022.sh/refs/heads/main/shadowtls.sh
+    wget -N --no-check-certificate https://raw.githubusercontent.com/tunecc/ss22-ShadowTLS/refs/heads/main/shadowtls.sh
     if [ $? -ne 0 ]; then
         echo -e "${ERROR} ShadowTLS 脚本下载失败！"
         exit 1
