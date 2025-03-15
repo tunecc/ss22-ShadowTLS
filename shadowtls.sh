@@ -1,11 +1,4 @@
 #!/bin/bash
-# =========================================
-# 作者: jinqians
-# 日期: 2025年3月14日
-# 网站：jinqians.com
-# 描述: 这个脚本用于安装和管理 ShadowTLS V3
-# 版本: 1.1.0 - 优化兼容性和性能
-# =========================================
 
 # 定义颜色代码
 RED='\033[0;31m'
@@ -72,7 +65,7 @@ get_latest_version() {
     fi
 }
 
-# 检查 SS-Rust 是否已安装 - 更新为兼容ss.sh路径
+# 检查 SS-Rust 是否已安装
 check_ssrust() {
     if [ -f "$SS_RUST_BIN" ] && [ -f "$SS_RUST_CONFIG" ]; then
         return 0  # 已安装
@@ -123,11 +116,10 @@ get_ssrust_method() {
     echo "$method"
 }
 
-# 优化的获取服务器IP函数 - 只使用外部API
+# 优化的获取服务器IP函数
 get_server_ip() {
     local ipv4=""
-    
-    # 直接尝试多个IP服务以提高可靠性
+
     for ip_service in "ipv4.icanhazip.com" "api.ipify.org" "ip.sb" "ifconfig.me" "ipinfo.io/ip"; do
         echo -e "${YELLOW}尝试从 $ip_service 获取IP...${RESET}" >&2
         ipv4=$(curl -s4 --connect-timeout 5 "$ip_service" 2>/dev/null)
@@ -179,7 +171,7 @@ check_port_in_use() {
     fi
 }
 
-# 生成 SS 链接和配置 - 优化显示和格式
+# 生成 SS 链接和配置
 generate_ss_links() {
     local server_ip=$1
     local listen_port=$2
@@ -203,7 +195,7 @@ generate_ss_links() {
     echo -e "  SNI域名: ${CYAN}${stls_sni}${RESET}"
     echo -e "  版本: ${CYAN}3${RESET}"
     
-    # 生成 SS + ShadowTLS 合并链接 (优化链接生成)
+    # 生成 SS + ShadowTLS 合并链接
     local userinfo
     if [[ "${ssrust_method}" == 2022* ]]; then
         # 2022系列加密方式需要特殊处理
@@ -243,11 +235,10 @@ EOF
     echo -e "\n${GREEN}● 配置已保存至 ${CONFIG_DIR}/config.txt${RESET}"
 }
 
-# 安装 ShadowTLS - 优化安装流程和检测
+# 安装 ShadowTLS
 install_shadowtls() {
     echo -e "${CYAN}正在安装 ShadowTLS...${RESET}"
     
-    # 检测是否已安装ShadowTLS
     if [ -f "$INSTALL_DIR/shadow-tls" ] && systemctl is-enabled shadowtls &>/dev/null; then
         echo -e "${YELLOW}检测到ShadowTLS已安装，是否重新安装? [y/N]${RESET}"
         read -r reinstall
@@ -255,15 +246,13 @@ install_shadowtls() {
             echo -e "${GREEN}已取消重新安装${RESET}"
             return 0
         fi
-        
-        # 停止现有服务
+
         systemctl stop shadowtls &>/dev/null
     fi
-    
-    # 检测 SS-Rust 是否已安装
+
     if ! check_ssrust; then
-        echo -e "${RED}未检测到 Shadowsocks Rust (ss-rust)，请先安装${RESET}"
-        echo -e "${YELLOW}提示: 可以使用 ss.sh 脚本安装 Shadowsocks Rust${RESET}"
+        echo -e "${RED}未检测到 Shadowsocks Rust，请先安装${RESET}"
+        echo -e "${YELLOW}提示: 可以使用 ./ss22.sh 安装 Shadowsocks Rust${RESET}"
         return 1
     fi
     
@@ -290,8 +279,7 @@ install_shadowtls() {
     
     # 获取最新版本
     local version=$(get_latest_version)
-    
-    # ===== 修改的下载部分开始 =====
+
     echo -e "${CYAN}正在下载 ShadowTLS ${version}...${RESET}"
     local download_url="https://github.com/ihciah/shadow-tls/releases/download/${version}/shadow-tls-${arch}"
     echo -e "${YELLOW}下载URL: ${download_url}${RESET}"
@@ -332,7 +320,6 @@ install_shadowtls() {
         echo -e "${RED}文件不存在，下载可能失败${RESET}"
         exit 1
     fi
-    # ===== 修改的下载部分结束 =====
 
     # 移动到最终位置并设置权限
     mv "/tmp/shadow-tls.tmp" "$INSTALL_DIR/shadow-tls"
@@ -470,16 +457,41 @@ EOF
     generate_ss_links "${server_ip}" "${listen_port}" "${ssrust_password}" "${ssrust_method}" "${password}" "${tls_domain}" "${ss_port}"
 
     echo -e "\n${GREEN}服务已启动并设置为开机自启${RESET}"
+    
+    # 添加每天5点5分自动重启的定时任务
+    echo -e "${CYAN}正在设置 ShadowTLS 每天 5:05 自动重启...${RESET}"
+    
+    # 设置重启时间为5:05
+    local hour="5"
+    local minute="5"
+    
+    # 获取现有的crontab配置
+    local current_cron
+    current_cron=$(crontab -l 2>/dev/null)
+    
+    # 构建新的crontab条目
+    local cron_line="${minute} ${hour} * * * systemctl restart shadowtls"
+    
+    # 检查是否已有shadowtls重启任务
+    if echo "$current_cron" | grep -q "systemctl restart shadowtls"; then
+        # 删除现有任务
+        current_cron=$(echo "$current_cron" | grep -v "systemctl restart shadowtls")
+        echo -e "${YELLOW}已删除旧的定时重启任务${RESET}"
+    fi
+    
+    # 更新crontab
+    (echo "${current_cron}"; echo "${cron_line}") | sort | uniq | crontab -
+    
+    echo -e "${GREEN}● 定时重启已自动设置成功${RESET}"
+    echo -e "  ShadowTLS 将在每天 ${CYAN}${hour}:${minute}${RESET} 自动重启"
 }
 
 # 卸载 ShadowTLS
 uninstall_shadowtls() {
     echo -e "${CYAN}正在卸载 ShadowTLS...${RESET}"
     
-    # 确认卸载 - y、Y或回车确认，其他键退出
     read -rp "确认要卸载 ShadowTLS? (y/回车确认，其他键取消): " confirm
-    
-    # 如果输入是y、Y或回车(空输入)，则继续卸载
+
     if [[ "${confirm,,}" =~ ^y(es)?$ || -z "$confirm" ]]; then
         echo -e "${GREEN}开始卸载...${RESET}"
     else
@@ -519,7 +531,7 @@ uninstall_shadowtls() {
     echo -e "${GREEN}ShadowTLS 已成功卸载${RESET}"
 }
 
-# 查看配置 - 优化显示
+# 查看配置
 view_config() {
     echo -e "${CYAN}正在获取配置信息...${RESET}"
     
@@ -785,7 +797,6 @@ upgrade_shadowtls() {
         systemctl start shadowtls 2>/dev/null || systemctl start shadowtls-ss 2>/dev/null
         return 1
     fi
-    # ===== 修改的下载部分结束 =====
     
     # 备份旧版本
     mv "$INSTALL_DIR/shadow-tls" "$INSTALL_DIR/shadow-tls.old"
@@ -811,7 +822,6 @@ upgrade_shadowtls() {
 }
 
 # 主菜单
-
 main_menu() {
     while true; do
         clear
