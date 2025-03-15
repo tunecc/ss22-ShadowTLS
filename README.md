@@ -36,9 +36,12 @@ systemd 服务默认不继承用户的 ulimit 设置。即使通过 /etc/securit
 
 ## 鸣谢
 
-我的脚本是基于下面的大佬开发的修改的，感谢他们的贡献
+我的脚本是基于下面的大佬开发的修改的，感谢他们的贡献  
+
 https://github.com/xOS/Shadowsocks-Rust （安装Shadowsocks-Rust）
+
 https://github.com/Kismet0123/ShadowTLS-Manager （安装ShadowTLS-Manager）
+
 https://github.com/jinqians/ss-2022.sh （Shadowsocks Rust 和 ShadowTLS结合）
 
 全程用学生包白嫖的 GitHub Copilot（Claude 3.7 Sonnet Thinking）写出的脚本
