@@ -2,12 +2,6 @@
 PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
 export PATH
 
-#=================================================
-#	System Required: CentOS/Debian/Ubuntu
-#	Description: Shadowsocks Rust 管理脚本 + 每日定时重启
-#	Author: 翠花 (原作者) & 集成定时重启示例
-#=================================================
-
 sh_ver="1.5.0"
 filepath=$(cd "$(dirname "$0")"; pwd)
 file_1=$(echo -e "${filepath}"|awk -F "$0" '{print $1}')
@@ -459,8 +453,42 @@ Install(){
 	Write_config
 	echo -e "${Info} 所有步骤 安装完毕，开始启动..."
 	Start
-	echo -e "${Info} 启动完成，查看配置..."
-	View
+	
+	echo -e "${Info} 正在设置每日5:00自动重启..."
+	RESTART_HOUR="5"
+	RESTART_MINUTE="0"
+	JOB_LINE="${RESTART_MINUTE} ${RESTART_HOUR} * * * /usr/bin/systemctl restart ss-rust"
+	CRONTAB_CONTENT=$(crontab -l 2>/dev/null)
+
+	if echo "${CRONTAB_CONTENT}" | grep -q "${JOB_LINE}"; then
+		echo -e "${Info} 已存在每日 ${RESTART_HOUR}:${RESTART_MINUTE} 重启 Shadowsocks-Rust 的任务，无需重复添加。"
+	else
+		(echo "${CRONTAB_CONTENT}"; echo "${JOB_LINE}") | crontab -
+		echo -e "${Info} 已添加每日 ${RESTART_HOUR}:${RESTART_MINUTE} 重启 Shadowsocks-Rust 的计划任务。"
+	fi
+	
+	echo -e "${Info} 启动完成！"
+	
+	echo -e "\n${YELLOW}===============================================${RESET}"
+	echo -e "${GREEN}Shadowsocks Rust 已成功安装!${RESET}"
+	echo -e "${YELLOW}===============================================${RESET}"
+	echo -e "\n${CYAN}是否需要继续安装 ShadowTLS 进行流量混淆? [Y/n]${RESET}"
+	read -r install_stls
+	case "$install_stls" in
+		[yY][eE][sS]|[yY]|"")
+			echo -e "${GREEN}正在准备安装 ShadowTLS...${RESET}"
+			install_shadowtls
+			;;
+		*)
+			echo -e "${YELLOW}已跳过 ShadowTLS 安装，如需安装请稍后在菜单中选择安装选项。${RESET}"
+			echo -e "${Info} 显示当前配置信息..."
+			View
+			;;
+	esac
+	
+	echo -e "\n${GREEN}安装过程已完成!${RESET}"
+	sleep 2
+	Before_Start_Menu
 }
 
 Start(){
@@ -529,12 +557,73 @@ Uninstall(){
             echo -e "${Info} 已删除 Shadowsocks Rust 的定时重启任务"
         fi
         
-		echo && echo "Shadowsocks Rust 卸载完成！" && echo
+		echo -e "${Info} Shadowsocks Rust 卸载完成！"
+        
+        if [ -f "/usr/local/bin/shadow-tls" ] && systemctl is-enabled shadowtls &>/dev/null; then
+
+            echo -e "\n${YELLOW}===============================================${RESET}"
+            echo -e "${CYAN}检测到系统中已安装 ShadowTLS，是否需要一并卸载? [Y/n]${RESET}"
+            read -r uninstall_stls
+            case "$uninstall_stls" in
+                [yY][eE][sS]|[yY]|"")
+                    echo -e "${YELLOW}===============================================${RESET}"
+                    uninstall_shadowtls
+                    ;;
+                *)
+                    echo -e "${YELLOW}已跳过 ShadowTLS 卸载。${RESET}"
+                    ;;
+            esac
+        else
+            echo -e "\n${YELLOW}系统中未检测到 ShadowTLS 安装，跳过卸载步骤。${RESET}"
+        fi
 	else
 		echo && echo "卸载已取消..." && echo
 	fi
     sleep 3s
     Start_Menu
+}
+
+uninstall_shadowtls() {
+    echo -e "${CYAN}正在卸载 ShadowTLS...${RESET}"
+
+    read -rp "确认要卸载 ShadowTLS? (y/回车确认，其他键取消): " confirm
+
+    if [[ "${confirm,,}" =~ ^y(es)?$ || -z "$confirm" ]]; then
+        echo -e "${GREEN}开始卸载...${RESET}"
+    else
+        echo -e "${YELLOW}已取消卸载操作${RESET}"
+        return 0
+    fi
+    
+    # 停止并禁用服务
+    echo -e "${CYAN}停止并移除服务...${RESET}"
+    systemctl stop shadowtls &>/dev/null
+    systemctl disable shadowtls &>/dev/null
+    
+    # 删除服务文件
+    rm -f "/etc/systemd/system/shadowtls.service"
+    
+    # 删除二进制文件
+    echo -e "${CYAN}删除 ShadowTLS 程序文件...${RESET}"
+    rm -f "/usr/local/bin/shadow-tls"
+    
+    # 删除配置目录
+    echo -e "${CYAN}删除配置文件...${RESET}"
+    if [ -d "/etc/shadowtls" ]; then
+        rm -rf "/etc/shadowtls"
+        echo -e "${GREEN}已删除配置目录${RESET}"
+    fi
+    
+    # 删除定时重启任务
+    echo -e "${CYAN}检查并删除定时重启任务...${RESET}"
+    if crontab -l 2>/dev/null | grep -q "systemctl restart shadowtls"; then
+        crontab -l 2>/dev/null | grep -v "systemctl restart shadowtls" | crontab -
+        echo -e "${GREEN}已删除定时重启任务${RESET}"
+    fi
+
+    systemctl daemon-reload
+    
+    echo -e "${GREEN}ShadowTLS 已成功卸载${RESET}"
 }
 
 getipv4(){
@@ -566,7 +655,6 @@ View(){
 	check_installed_status
 	Read_config
 	
-	# 检查自定义配置文件是否存在
 	if [[ -f "/etc/shadowtls/config.txt" ]]; then
 		echo -e "${Info} 检测到自定义配置文件，显示内容如下："
 		echo -e "——————————————————————————————————"
@@ -641,7 +729,6 @@ Before_Start_Menu() {
     echo && echo -n -e "${Yellow_font_prefix}* 按回车返回主菜单 *${Font_color_suffix}" && read temp
     Start_Menu
 }
-
 
 # 设置每日定时重启
 Set_daily_restart(){
@@ -733,13 +820,15 @@ Start_Menu(){
     echo -e "${Cyan_font_prefix}◆ 其他选项${Font_color_suffix}"
     echo -e "  ${Green_font_prefix}10.${Font_color_suffix} 设置每日定时重启"
     echo -e "  ${Green_font_prefix}11.${Font_color_suffix} 更新脚本"
-    echo -e "  ${Green_font_prefix}12.${Font_color_suffix} 安装ShadowTLS"
+    echo -e "  ${Green_font_prefix}12.${Font_color_suffix} 管理ShadowTLS"
     echo -e "  ${Green_font_prefix}0.${Font_color_suffix}  退出脚本"
     echo -e "${Yellow_font_prefix}=============================================================${Font_color_suffix}"
     echo
     read -e -p " 请输入数字 [0-11]：" num
     case "$num" in
         0)
+            clear
+            echo -e "输入 ./ss22.sh 即可运行脚本"
             exit 0
             ;;
         1)
