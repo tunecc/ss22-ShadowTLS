@@ -11,7 +11,16 @@ CONF="/etc/ss-rust/config.json"
 Now_ver_File="/etc/ss-rust/ver.txt"
 Local="/etc/sysctl.d/local.conf"
 
-Green_font_prefix="\033[32m" && Red_font_prefix="\033[31m" && Green_background_prefix="\033[42;37m" && Red_background_prefix="\033[41;37m" && Font_color_suffix="\033[0m" && Yellow_font_prefix="\033[0;33m"
+Green_font_prefix="\033[32m"
+Red_font_prefix="\033[31m"
+Green_background_prefix="\033[42;37m"
+Red_background_prefix="\033[41;37m"
+Font_color_suffix="\033[0m"
+Yellow_font_prefix="\033[0;33m"
+Cyan_font_prefix="\033[36m"
+Blue_font_prefix="\033[34m"
+Purple_background_prefix="\033[45;37m"
+
 Info="${Green_font_prefix}[信息]${Font_color_suffix}"
 Error="${Red_font_prefix}[错误]${Font_color_suffix}"
 Tip="${Yellow_font_prefix}[注意]${Font_color_suffix}"
@@ -655,34 +664,63 @@ View(){
 	check_installed_status
 	Read_config
 	
-	if [[ -f "/etc/shadowtls/config.txt" ]]; then
-		echo -e "${Info} 检测到自定义配置文件，显示内容如下："
-		echo -e "——————————————————————————————————"
-		cat "/etc/shadowtls/config.txt"
-		echo -e "——————————————————————————————————"
+	# 原始配置显示
+	getipv4
+	getipv6
+	echo -e "\n${Yellow_font_prefix}=== Shadowsocks Rust 配置 ===${Font_color_suffix}"
+	[[ "${ipv4}" != "IPv4_Error" ]] && echo -e " 地址：${Green_font_prefix}${ipv4}${Font_color_suffix}"
+	[[ "${ipv6}" != "IPv6_Error" ]] && echo -e " 地址：${Green_font_prefix}${ipv6}${Font_color_suffix}"
+	echo -e " 端口：${Green_font_prefix}${port}${Font_color_suffix}"
+	echo -e " 密码：${Green_font_prefix}${password}${Font_color_suffix}"
+	echo -e " 加密：${Green_font_prefix}${cipher}${Font_color_suffix}"
+	echo -e " TFO ：${Green_font_prefix}${tfo}${Font_color_suffix}"
+	
+	# 检查 ShadowTLS 是否安装并获取配置
+	local has_shadowtls=false
+	local stls_listen_port=""
+	local stls_password=""
+	local stls_sni=""
+	
+	if [ -f "/etc/systemd/system/shadowtls.service" ]; then
+		has_shadowtls=true
+		echo -e "\n${Yellow_font_prefix}=== ShadowTLS 配置 ===${Font_color_suffix}"
+		
+		# 从 shadowtls.service 文件中获取配置信息
+        stls_listen_port=$(grep -oP '(?<=--listen \[\:\:\]\:)\d+' /etc/systemd/system/shadowtls.service)
+		stls_password=$(grep -oP '(?<=--password )\S+' /etc/systemd/system/shadowtls.service)
+		stls_sni=$(grep -oP '(?<=--tls )\S+' /etc/systemd/system/shadowtls.service)
+
+		echo -e " 监听端口：${Green_font_prefix}${stls_listen_port}${Font_color_suffix}"
+		echo -e " 密码：${Green_font_prefix}${stls_password}${Font_color_suffix}"
+		echo -e " SNI：${Green_font_prefix}${stls_sni}${Font_color_suffix}"
+	fi
+	
+	[[ ! -z "${link_ipv4}" ]] && echo -e "${link_ipv4}"
+	[[ ! -z "${link_ipv6}" ]] && echo -e "${link_ipv6}"
+	echo -e "\n${Yellow_font_prefix}=== Surge 配置 ===${Font_color_suffix}"
+	if [[ "${ipv4}" != "IPv4_Error" ]]; then
+		echo -e "$(uname -n) = ss,${ipv4},${port},encrypt-method=${cipher},password=${password},tfo=${tfo},udp-relay=true,ecn=true"
 	else
-		# 原始配置显示
-		getipv4
-		getipv6
-		echo -e "Shadowsocks Rust 配置："
-		echo -e "——————————————————————————————————"
-		[[ "${ipv4}" != "IPv4_Error" ]] && echo -e " 地址：${Green_font_prefix}${ipv4}${Font_color_suffix}"
-		[[ "${ipv6}" != "IPv6_Error" ]] && echo -e " 地址：${Green_font_prefix}${ipv6}${Font_color_suffix}"
-		echo -e " 端口：${Green_font_prefix}${port}${Font_color_suffix}"
-		echo -e " 密码：${Green_font_prefix}${password}${Font_color_suffix}"
-		echo -e " 加密：${Green_font_prefix}${cipher}${Font_color_suffix}"
-		echo -e " TFO ：${Green_font_prefix}${tfo}${Font_color_suffix}"
-		echo -e "——————————————————————————————————"
-		[[ ! -z "${link_ipv4}" ]] && echo -e "${link_ipv4}"
-		[[ ! -z "${link_ipv6}" ]] && echo -e "${link_ipv6}"
-		echo -e "—————————————————————————"
-		echo -e "${Info} Surge 配置："
+		echo -e "$(uname -n) = ss,${ipv6},${port},encrypt-method=${cipher},password=${password},tfo=${tfo},udp-relay=true,ecn=true"
+	fi
+	
+	# 如果安装了 ShadowTLS，生成合并链接和配置
+	if [ "$has_shadowtls" = true ]; then
+		# 生成 SS + ShadowTLS 合并链接
+		local ss_userinfo=$(echo -n "${cipher}:${password}" | base64 | tr -d '\n')
+		local shadow_tls_config="{\"version\":\"3\",\"password\":\"${stls_password}\",\"host\":\"${stls_sni}\",\"port\":\"${stls_listen_port}\",\"address\":\"${ipv4}\"}"
+		local shadow_tls_base64=$(echo -n "${shadow_tls_config}" | base64 | tr -d '\n')
+		local ss_stls_url="ss://${ss_userinfo}@${ipv4}:${port}?shadow-tls=${shadow_tls_base64}#SS-${ipv4}"
+
+		echo -e "\n${Yellow_font_prefix}=== SS + ShadowTLS 链接 ===${Font_color_suffix}"
+		echo -e "${ss_stls_url}"
+
+		echo -e "\n${Yellow_font_prefix}=== Surge Shadowsocks + ShadowTLS 配置 ===${Font_color_suffix}"
 		if [[ "${ipv4}" != "IPv4_Error" ]]; then
-			echo -e "$(uname -n) = ss,${ipv4},${port},encrypt-method=${cipher},password=${password},tfo=${tfo},udp-relay=true,ecn=true"
+			echo -e "$(uname -n) = ss, ${ipv4}, ${stls_listen_port}, encrypt-method=${cipher}, password=${password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${stls_sni}, shadow-tls-version=3, udp-relay=true, udp-port=${port}"
 		else
-			echo -e "$(uname -n) = ss,${ipv6},${port},encrypt-method=${cipher},password=${password},tfo=${tfo},udp-relay=true,ecn=true"
+			echo -e "$(uname -n) = ss, ${ipv6}, ${stls_listen_port}, encrypt-method=${cipher}, password=${password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${stls_sni}, shadow-tls-version=3, udp-relay=tru, udp-port=${port}"
 		fi
-		echo -e "—————————————————————————"
 	fi
 
 	Before_Start_Menu
@@ -690,11 +728,8 @@ View(){
 
 Status(){
 	echo -e "${Info} 获取 Shadowsocks Rust 活动日志 ……"
-	echo -e "${Tip} 可以按键盘上的 'q' 退出日志面板。"
 	systemctl status ss-rust
-	echo
-	read -p "按回车键返回主菜单..." temp
-	Start_Menu
+	Before_Start_Menu
 }
 
 Update_Shell(){
@@ -726,7 +761,8 @@ Update_Shell(){
 }
 
 Before_Start_Menu() {
-    echo && echo -n -e "${Yellow_font_prefix}* 按回车返回主菜单 *${Font_color_suffix}" && read temp
+    echo && echo -n -e "${Yellow_font_prefix}* 按任意键返回主菜单 *${Font_color_suffix}" && read -n 1 -s temp
+    echo
     Start_Menu
 }
 
@@ -812,7 +848,7 @@ Start_Menu(){
     echo
     
     echo -e "${Cyan_font_prefix}◆ 配置管理${Font_color_suffix}"
-    echo -e "  ${Green_font_prefix}7.${Font_color_suffix} 设置 配置信息"
+    echo -e "  ${Green_font_prefix}7.${Font_color_suffix} 修改 配置信息"
     echo -e "  ${Green_font_prefix}8.${Font_color_suffix} 查看 配置信息"
     echo -e "  ${Green_font_prefix}9.${Font_color_suffix} 查看 运行状态"
     echo
@@ -869,7 +905,7 @@ Start_Menu(){
             ;;
         *)
             echo -e "${Red_font_prefix}错误:${Font_color_suffix} 请输入正确数字 [0-12]"
-            sleep 2
+            sleep 1
             Start_Menu
             ;;
     esac
