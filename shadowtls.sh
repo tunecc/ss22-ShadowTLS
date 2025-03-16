@@ -15,8 +15,8 @@ RESET='\033[0m'
 # 与ss.sh兼容的路径定义
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/shadowtls"
-SS_RUST_BIN="/usr/local/bin/ss-rust"  # 匹配ss.sh的路径
-SS_RUST_CONFIG="/etc/ss-rust/config.json"  # 匹配ss.sh的配置文件
+SS_RUST_BIN="/usr/local/bin/ss-rust"
+SS_RUST_CONFIG="/etc/ss-rust/config.json"
 SERVICE_FILE="/etc/systemd/system/shadowtls.service"
 
 # 检查是否以 root 权限运行
@@ -207,8 +207,11 @@ generate_ss_links() {
     local shadow_tls_config="{\"version\":\"3\",\"password\":\"${stls_password}\",\"host\":\"${stls_sni}\",\"port\":\"${listen_port}\",\"address\":\"${server_ip}\"}"
     local shadow_tls_base64=$(echo -n "${shadow_tls_config}" | base64 | tr -d '\n' | tr -d '=' | tr '+/' '-_')
     local ss_url="ss://${userinfo}@${server_ip}:${backend_port}?shadow-tls=${shadow_tls_base64}#SS-${server_ip}"
-    
-    echo -e "\n${GREEN}● Surge 配置${RESET}"
+
+    echo -e "\n${GREEN}Shadowsocks 配置${RESET}"
+    echo -e "${CYAN}ss-${server_ip} = ss, ${server_ip}, ${backend_port}, encrypt-method=${ssrust_method}, password=${ssrust_password}, udp-relay=true${RESET}"
+
+    echo -e "\n${GREEN}Shadowsocks+ShadowTLS  配置${RESET}"
     echo -e "${CYAN}ss-${server_ip} = ss, ${server_ip}, ${listen_port}, encrypt-method=${ssrust_method}, password=${ssrust_password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${stls_sni}, shadow-tls-version=3, udp-relay=true, udp-port=${backend_port}${RESET}"
 
     # 保存配置到文件
@@ -228,7 +231,10 @@ ShadowTLS 配置:
 - SNI域名: ${stls_sni}
 - 版本: 3
 
-Surge 配置:
+Shadowsocks  配置:
+ss-${server_ip} = ss, ${server_ip}, ${backend_port}, encrypt-method=${ssrust_method}, password=${ssrust_password}, udp-relay=true
+
+Shadowsocks+ShadowTLS  配置:
 ss-${server_ip} = ss, ${server_ip}, ${listen_port}, encrypt-method=${ssrust_method}, password=${ssrust_password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${stls_sni}, shadow-tls-version=3, udp-relay=true, udp-port=${backend_port}
 
 EOF
