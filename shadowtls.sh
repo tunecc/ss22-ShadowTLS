@@ -241,7 +241,47 @@ EOF
     echo -e "\n${GREEN}● 配置已保存至 ${CONFIG_DIR}/config.txt${RESET}"
 }
 
-# 安装 ShadowTLS
+# 检查域名的有效性
+check_domain_validity() {
+    local domain="$1"
+    if nslookup "$domain" >/dev/null 2>&1; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# 循环提示用户输入有效的伪装域名
+prompt_valid_domain() {
+    local domain
+    local default_domain="www.tesla.com"
+    
+    while true; do
+        # 直接在函数内处理默认值逻辑
+        read -rp "请输入用于伪装的域名（需支持 TLS 1.3）(默认：${default_domain}): " domain
+        # 如果用户直接回车，使用默认值
+        if [ -z "$domain" ]; then
+            domain="$default_domain"
+        fi
+        
+        if [[ "$domain" == "www.tesla.com" ]]; then
+            # 默认域名跳过验证
+            echo -e "${GREEN}默认域名 www.tesla.com 验证通过。${RESET}" >&2
+            echo "$domain"
+            return 0
+        fi
+        
+        echo -e "${CYAN}正在验证域名 ${domain} 的有效性，请稍候...${RESET}" >&2
+        if check_domain_validity "$domain"; then
+            echo -e "${GREEN}域名 ${domain} 验证通过。${RESET}" >&2
+            echo "$domain"
+            return 0
+        else
+            echo -e "${RED}域名 ${domain} 无效或无法解析，请重新输入。${RESET}" >&2
+        fi
+    done
+}
+
 install_shadowtls() {
     echo -e "${CYAN}正在安装 ShadowTLS...${RESET}"
     
@@ -375,12 +415,52 @@ install_shadowtls() {
         break
     done
     
-    # 获取伪装域名输入
-    read -rp "请输入 TLS 伪装域名 (回车默认为 www.microsoft.com): " tls_domain
+    # 获取伪装域名输入（使用域名验证功能）
+    tls_domain=$(prompt_valid_domain)
     
-    # 如果用户未输入域名，使用默认值
-    if [ -z "$tls_domain" ]; then
-        tls_domain="www.microsoft.com"
+    # 添加是否开启 fastopen 的选项
+    local fastopen_option=""
+    while true; do
+        read -rp "是否开启 fastopen？(y/n, 回车不开启): " reply
+        if [[ -z "$reply" || "${reply,,}" =~ ^[yn]$ ]]; then
+            break
+        else
+            echo -e "${RED}错误: 请输入 'y' 或 'n'${RESET}"
+        fi
+    done
+    if [[ "${reply,,}" == "y" ]]; then
+        fastopen_option="--fastopen "
+        echo -e "${GREEN}已开启 fastopen 选项${RESET}"
+    fi
+    
+    # 添加是否开启泛域名SNI的选项
+    local wildcard_sni_option=""
+    while true; do
+        read -rp "是否开启泛域名SNI？(开启后客户端伪装域名无需与服务端一致) (y/n, 回车不开启): " reply
+        if [[ -z "$reply" || "${reply,,}" =~ ^[yn]$ ]]; then
+            break
+        else
+            echo -e "${RED}错误: 请输入 'y' 或 'n'${RESET}"
+        fi
+    done
+    if [[ "${reply,,}" == "y" ]]; then
+        wildcard_sni_option="--wildcard-sni "
+        echo -e "${GREEN}已开启泛域名SNI选项${RESET}"
+    fi
+    
+    # 添加是否开启严格模式的选项
+    local strict_option=""
+    while true; do
+        read -rp "是否开启严格模式？(提高安全性和伪装效果，推荐开启) (y/n, 回车开启): " reply
+        if [[ -z "$reply" || "${reply,,}" =~ ^[yn]$ ]]; then
+            break
+        else
+            echo -e "${RED}错误: 请输入 'y' 或 'n'${RESET}"
+        fi
+    done
+    if [[ -z "$reply" || "${reply,,}" == "y" ]]; then
+        strict_option="--strict "
+        echo -e "${GREEN}已开启严格模式${RESET}"
     fi
     
     # 检测虚拟化类型
@@ -394,9 +474,10 @@ install_shadowtls() {
 [Unit]
 Description=Shadow-TLS Server Service for Shadowsocks
 After=network-online.target
-Wants=network-online.target
+Wants=network-online.target systemd-networkd-wait-online.service
 
 [Service]
+LimitNOFILE=32767
 Type=simple
 User=root
 Restart=on-failure
@@ -409,18 +490,35 @@ EOF
         echo -e "${GREEN}检测到KVM虚拟化环境，已添加性能优化选项${RESET}"
     fi
     
-    # 继续添加服务配置
+    # 继续添加服务配置，包含用户选择的选项
     cat >> "/etc/systemd/system/shadowtls.service" << EOF
 Environment=MONOIO_FORCE_LEGACY_DRIVER=1
-ExecStart=$INSTALL_DIR/shadow-tls --v3 --fastopen server --listen [::]:${listen_port} --server 127.0.0.1:${ss_port} --tls ${tls_domain} --password ${password}
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=shadowtls
+ExecStart=$INSTALL_DIR/shadow-tls --v3 ${fastopen_option}${strict_option}server ${wildcard_sni_option}--listen [::]:${listen_port} --server 127.0.0.1:${ss_port} --tls ${tls_domain}:443 --password ${password}
 
 [Install]
 WantedBy=multi-user.target
 EOF
     
+    # 修复 bad substitution 错误
+    # 使用更兼容的方式设置选项状态
+    if [ -n "$fastopen_option" ]; then
+        FASTOPEN_STATUS="yes"
+    else
+        FASTOPEN_STATUS="no"
+    fi
+
+    if [ -n "$wildcard_sni_option" ]; then
+        WILDCARD_SNI_STATUS="yes"
+    else
+        WILDCARD_SNI_STATUS="no"
+    fi
+
+    if [ -n "$strict_option" ]; then
+        STRICT_MODE_STATUS="yes"
+    else
+        STRICT_MODE_STATUS="no"
+    fi
+
     # 保存配置信息到文件
     mkdir -p "$CONFIG_DIR"
     cat > "$CONFIG_DIR/env" << EOF
@@ -429,6 +527,9 @@ LISTEN_PORT=${listen_port}
 TLS_DOMAIN=${tls_domain}
 PASSWORD=${password}
 SS_PORT=${ss_port}
+FASTOPEN_ENABLED=${FASTOPEN_STATUS}
+WILDCARD_SNI_ENABLED=${WILDCARD_SNI_STATUS}
+STRICT_MODE_ENABLED=${STRICT_MODE_STATUS}
 EOF
     
     # 重新加载 systemd 配置
@@ -849,7 +950,7 @@ main_menu() {
             status="${RED}未安装${RESET}"
         fi
         
-        echo -e "\n ${LIGHT_CYAN}═════════════ ${WHITE}ShadowTLS V3 管理脚本${RESET} ${LIGHT_GREEN}v1.1.0${RESET} ${LIGHT_CYAN}═════════════${RESET}"
+        echo -e "\n ${LIGHT_CYAN}═════════════ ${WHITE}ShadowTLS V3 管理脚本${RESET} ${LIGHT_GREEN}v1.4.0${RESET} ${LIGHT_CYAN}═════════════${RESET}"
         echo -e ""
         echo -e " ${MAGENTA}●${RESET} 当前状态: $status"
         
