@@ -674,7 +674,7 @@ view_config() {
         fi
         
         # 提取TLS域名
-        tls_domain=$(grep -oP '(?<=--tls )[^ ]+' "$service_file" 2>/dev/null)
+        tls_domain=$(grep -oP '(?<=--tls )[^:]+(?=:443\b)' "$service_file" 2>/dev/null)
         
         # 提取密码
         password=$(grep -oP '(?<=--password )[^ ]+' "$service_file" 2>/dev/null)
@@ -803,7 +803,7 @@ upgrade_shadowtls() {
             listen_port=$(grep -oP '(?<=--listen )\S+?:\K\d+' "$service_file" 2>/dev/null)
         fi
         
-        tls_domain=$(grep -oP '(?<=--tls )[^ ]+' "$service_file" 2>/dev/null)
+        tls_domain=$(grep -oP '(?<=--tls )[^:]+(?=:443\b)' "$service_file" 2>/dev/null)
         password=$(grep -oP '(?<=--password )[^ ]+' "$service_file" 2>/dev/null)
         ss_port=$(grep -oP '(?<=--server 127.0.0.1:)\d+' "$service_file" 2>/dev/null)
     fi

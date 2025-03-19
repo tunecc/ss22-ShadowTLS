@@ -688,7 +688,7 @@ View(){
 		# 从 shadowtls.service 文件中获取配置信息
         stls_listen_port=$(grep -oP '(?<=--listen \[\:\:\]\:)\d+' /etc/systemd/system/shadowtls.service)
 		stls_password=$(grep -oP '(?<=--password )\S+' /etc/systemd/system/shadowtls.service)
-		stls_sni=$(grep -oP '(?<=--tls )\S+' /etc/systemd/system/shadowtls.service)
+		stls_sni=$(grep -oP '(?<=--tls )[^:]+(?=:443\b)' /etc/systemd/system/shadowtls.service)
 
 		echo -e " 监听端口：${Green_font_prefix}${stls_listen_port}${Font_color_suffix}"
 		echo -e " 密码：${Green_font_prefix}${stls_password}${Font_color_suffix}"
