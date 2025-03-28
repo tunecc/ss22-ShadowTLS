@@ -2,7 +2,7 @@
 PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
 export PATH
 
-sh_ver="1.5.0"
+sh_ver="1.6.0"
 filepath=$(cd "$(dirname "$0")"; pwd)
 file_1=$(echo -e "${filepath}"|awk -F "$0" '{print $1}')
 FOLDER="/etc/ss-rust"
@@ -234,7 +234,15 @@ Installation_dependency(){
 		apt-get update
 		apt-get install jq gzip wget curl unzip xz-utils openssl -y
 	fi
-	\cp -f /usr/share/zoneinfo/Asia/Shanghai /etc/localtime 2>/dev/null
+	
+	# 设置时区
+	echo "正在设置时区..."
+	if [ -f "/usr/share/zoneinfo/Asia/Shanghai" ]; then
+		ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+		echo "Asia/Shanghai" > /etc/timezone
+	else
+		echo "时区文件不存在，跳过设置"
+	fi
 }
 
 Write_config(){
@@ -247,8 +255,7 @@ Write_config(){
     "fast_open": ${tfo},
     "mode": "tcp_and_udp",
     "user":"nobody",
-    "timeout":300,
-    "nameserver":"1.1.1.1"
+    "timeout":300${dns:+",\n    \"nameserver\":\"${dns}\""}
 }
 EOF
 }
@@ -259,6 +266,7 @@ Read_config(){
 	password=$(cat ${CONF} | jq -r '.password')
 	cipher=$(cat ${CONF} | jq -r '.method')
 	tfo=$(cat ${CONF} | jq -r '.fast_open')
+	dns=$(cat ${CONF} | jq -r '.nameserver // empty')
 }
 
 Set_port(){
@@ -387,6 +395,30 @@ Set_cipher(){
 	echo "==================================" && echo
 }
 
+Set_dns(){
+	echo -e "请选择 DNS 配置方式：
+==================================
+ ${Green_font_prefix}1.${Font_color_suffix} 使用系统默认 DNS ${Green_font_prefix}(推荐)${Font_color_suffix}
+ ${Green_font_prefix}2.${Font_color_suffix} 自定义 DNS 服务器
+=================================="
+	read -e -p "(默认：1)：" dns_choice
+	[[ -z "${dns_choice}" ]] && dns_choice="1"
+	
+	if [[ ${dns_choice} == "2" ]]; then
+		echo -e "请输入自定义 DNS 服务器地址（多个 DNS 用逗号分隔，如：8.8.8.8,8.8.4.4）"
+		read -e -p "(默认：8.8.8.8)：" dns
+		[[ -z "${dns}" ]] && dns="8.8.8.8"
+		echo && echo "=================================="
+		echo -e "DNS：${Red_background_prefix} ${dns} ${Font_color_suffix}"
+		echo "==================================" && echo
+	else
+		dns=""
+		echo && echo "=================================="
+		echo -e "DNS：${Red_background_prefix} 使用系统默认 DNS ${Font_color_suffix}"
+		echo "==================================" && echo
+	fi
+}
+
 Set(){
 	check_installed_status
 	echo && echo -e "请选择要修改的配置：
@@ -395,8 +427,9 @@ Set(){
  ${Green_font_prefix}2.${Font_color_suffix}  修改 加密配置
  ${Green_font_prefix}3.${Font_color_suffix}  修改 密码配置
  ${Green_font_prefix}4.${Font_color_suffix}  修改 TFO 配置
+ ${Green_font_prefix}5.${Font_color_suffix}  修改 DNS 配置
 ==================================
- ${Green_font_prefix}5.${Font_color_suffix}  修改 全部配置" && echo
+ ${Green_font_prefix}6.${Font_color_suffix}  修改 全部配置" && echo
 	read -e -p "(默认取消)：" modify
 	[[ -z "${modify}" ]] && echo "已取消..." && exit 1
 	if [[ "${modify}" == "1" ]]; then
@@ -433,14 +466,24 @@ Set(){
 		Restart
 	elif [[ "${modify}" == "5" ]]; then
 		Read_config
+		Set_dns
+		port=${port}
+		password=${password}
+		cipher=${cipher}
+		tfo=${tfo}
+		Write_config
+		Restart
+	elif [[ "${modify}" == "6" ]]; then
+		Read_config
 		Set_port
 		Set_cipher
 		Set_password
 		Set_tfo
+		Set_dns
 		Write_config
 		Restart
 	else
-		echo -e "${Error} 请输入正确的数字(1-5)" && exit 1
+		echo -e "${Error} 请输入正确的数字(1-6)" && exit 1
 	fi
 }
 
@@ -451,6 +494,7 @@ Install(){
 	Set_cipher
 	Set_password
 	Set_tfo
+	Set_dns
 	echo -e "${Info} 开始安装/配置 依赖..."
 	Installation_dependency
 	echo -e "${Info} 开始下载/安装..."
@@ -674,6 +718,11 @@ View(){
 	echo -e " 密码：${Green_font_prefix}${password}${Font_color_suffix}"
 	echo -e " 加密：${Green_font_prefix}${cipher}${Font_color_suffix}"
 	echo -e " TFO ：${Green_font_prefix}${tfo}${Font_color_suffix}"
+	if [[ -n "${dns}" ]]; then
+		echo -e " DNS ：${Green_font_prefix}${dns}${Font_color_suffix}"
+	else
+		echo -e " DNS ：${Green_font_prefix}使用系统默认${Font_color_suffix}"
+	fi
 	
 	# 检查 ShadowTLS 是否安装并获取配置
 	local has_shadowtls=false
@@ -728,6 +777,7 @@ View(){
 
 Status(){
 	echo -e "${Info} 获取 Shadowsocks Rust 活动日志 ……"
+	echo -e "${Tip} 可以按键盘上的 'q' 退出日志面板。"
 	systemctl status ss-rust
 	Before_Start_Menu
 }
