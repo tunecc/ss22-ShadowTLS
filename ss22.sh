@@ -4,12 +4,10 @@ export PATH
 
 sh_ver="1.7.0"
 filepath=$(cd "$(dirname "$0")"; pwd)
-file_1=$(echo -e "${filepath}"|awk -F "$0" '{print $1}')
 FOLDER="/etc/ss-rust"
 FILE="/usr/local/bin/ss-rust"
 CONF="/etc/ss-rust/config.json"
 Now_ver_File="/etc/ss-rust/ver.txt"
-Local="/etc/sysctl.d/local.conf"
 
 # 颜色定义
 Green_font_prefix="\033[32m"
@@ -1230,14 +1228,6 @@ install_shadowtls() {
     # 安装完成后清理脚本文件
     rm -f shadowtls.sh
     echo -e "${Info} ShadowTLS 安装完成！"
-    
-    # 询问是否查看配置
-    read -e -p "立即查看 SS + ShadowTLS 配置？[Y/n]" show_config
-    [[ -z "${show_config}" ]] && show_config="y"
-    
-    if [[ ${show_config} == [Yy] ]]; then
-        View
-    fi
 }
 
 # 主菜单
