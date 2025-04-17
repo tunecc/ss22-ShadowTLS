@@ -1227,7 +1227,6 @@ install_shadowtls() {
     
     # 安装完成后清理脚本文件
     rm -f shadowtls.sh
-    echo -e "${Info} ShadowTLS 安装完成！"
 }
 
 # 主菜单
