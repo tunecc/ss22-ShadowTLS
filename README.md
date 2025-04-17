@@ -4,6 +4,10 @@
 wget -N --no-check-certificate https://raw.githubusercontent.com/tunecc/ss22-ShadowTLS/refs/heads/main/ss22.sh && chmod +x ss22.sh && ./ss22.sh
 ```
 
+# 注意
+
+Loon 在2025年4月17日正式版已经支持reality协议，此脚本大概不会再更新了
+
 # 特点
 
 ## 自动根据系统架构添加来判断是否添加 ` ExecStartPre=/bin/sh -c "ulimit -n 51200"`
