@@ -1028,8 +1028,8 @@ View(){
     getipv6
     
     echo -e "\n${Yellow_font_prefix}=== Shadowsocks Rust 配置 ===${Font_color_suffix}"
-    [[ "${ipv4}" != "IPv4_Error" ]] && echo -e " 地址：${Green_font_prefix}${ipv4}${Font_color_suffix}"
-    [[ "${ipv6}" != "IPv6_Error" ]] && echo -e " 地址：${Green_font_prefix}${ipv6}${Font_color_suffix}"
+    [[ "${ipv4}" != "IPv4_Error" ]] && echo -e " IPv4 地址：${Green_font_prefix}${ipv4}${Font_color_suffix}"
+    [[ "${ipv6}" != "IPv6_Error" ]] && echo -e " IPv6 地址：${Green_font_prefix}${ipv6}${Font_color_suffix}"
     echo -e " 端口：${Green_font_prefix}${port}${Font_color_suffix}"
     echo -e " 密码：${Green_font_prefix}${password}${Font_color_suffix}"
     echo -e " 加密：${Green_font_prefix}${cipher}${Font_color_suffix}"
@@ -1075,24 +1075,27 @@ View(){
     [[ ! -z "${ss_url_ipv6}" ]] && echo -e "${Green_font_prefix}IPv6 链接：${Font_color_suffix}${ss_url_ipv6}"
 
     echo -e "\n${Yellow_font_prefix}=== Surge 配置 ===${Font_color_suffix}"
+    # 显示IPv4配置
     if [[ "${ipv4}" != "IPv4_Error" ]]; then
-        # 根据ecn值决定是否包含ecn参数
         if [[ "${ecn}" == "true" ]]; then
             echo -e "ss-${ipv4} = ss, ${ipv4}, ${port}, encrypt-method=${cipher}, password=${password}, tfo=${tfo}, udp-relay=true, ecn=true"
         else
             echo -e "ss-${ipv4} = ss, ${ipv4}, ${port}, encrypt-method=${cipher}, password=${password}, tfo=${tfo}, udp-relay=true"
         fi
-    else
-        # IPv6 版本配置
-        if [[ "${ipv6}" != "IPv6_Error" ]]; then
-            if [[ "${ecn}" == "true" ]]; then
-                echo -e "ss-${ipv6} = ss, ${ipv6}, ${port}, encrypt-method=${cipher}, password=${password}, tfo=${tfo}, udp-relay=true, ecn=true"
-            else
-                echo -e "ss-${ipv6} = ss, ${ipv6}, ${port}, encrypt-method=${cipher}, password=${password}, tfo=${tfo}, udp-relay=true"
-            fi
+    fi
+    
+    # 显示IPv6配置
+    if [[ "${ipv6}" != "IPv6_Error" ]]; then
+        if [[ "${ecn}" == "true" ]]; then
+            echo -e "ss-${ipv6} = ss, ${ipv6}, ${port}, encrypt-method=${cipher}, password=${password}, tfo=${tfo}, udp-relay=true, ecn=true"
         else
-            echo -e "${Error} 无法获取服务器IP地址，无法生成Surge配置"
+            echo -e "ss-${ipv6} = ss, ${ipv6}, ${port}, encrypt-method=${cipher}, password=${password}, tfo=${tfo}, udp-relay=true"
         fi
+    fi
+    
+    # 如果两种IP地址都无效，显示错误
+    if [[ "${ipv4}" == "IPv4_Error" && "${ipv6}" == "IPv6_Error" ]]; then
+        echo -e "${Error} 无法获取服务器IP地址，无法生成Surge配置"
     fi
 
     # 检查 ShadowTLS 是否安装并生成配置
@@ -1123,17 +1126,76 @@ View(){
 
 # 查看服务状态
 Status(){
-    echo -e "${Info} 获取 Shadowsocks Rust 活动日志..."
-    systemctl status ss-rust
+    check_installed_status
+    check_status
     
-    echo -e "\n${Info} 查看近期日志? [Y/n]"
-    read -e -p "(默认: Y): " show_logs
-    [[ -z "${show_logs}" ]] && show_logs="y"
+    echo -e "\n${Yellow_font_prefix}=== Shadowsocks Rust 服务状态 ===${Font_color_suffix}"
     
-    if [[ "${show_logs}" == [Yy] ]]; then
-        echo -e "\n${Yellow_font_prefix}=== 最近50行日志 ===${Font_color_suffix}"
-        journalctl -u ss-rust --no-pager -n 50
+    # 显示运行状态
+    if [[ "$status" == "running" ]]; then
+        echo -e " 运行状态：${Green_font_prefix}正在运行${Font_color_suffix}"
+        
+        # 获取进程ID和运行时间
+        local pid=$(systemctl show -p MainPID ss-rust | cut -d= -f2)
+        if [[ "$pid" != "0" ]]; then
+            echo -e " 进程 PID：${Green_font_prefix}${pid}${Font_color_suffix}"
+            
+            # 获取内存使用
+            local memory_usage=$(ps -o rss= -p $pid 2>/dev/null)
+            if [[ -n "$memory_usage" ]]; then
+                memory_usage=$(awk "BEGIN {printf \"%.2f\", ${memory_usage}/1024}")
+                echo -e " 内存占用：${Green_font_prefix}${memory_usage} MB${Font_color_suffix}"
+            fi
+            
+            # 获取启动时间
+            local started_at=$(systemctl show ss-rust -p ActiveEnterTimestamp | cut -d= -f2)
+            if [[ -n "$started_at" ]]; then
+                echo -e " 启动时间：${Green_font_prefix}${started_at}${Font_color_suffix}"
+            fi
+        fi
+        
+        # 检查监听端口
+        if command -v netstat &>/dev/null || command -v ss &>/dev/null; then
+            echo -e "\n${Yellow_font_prefix}=== 端口监听状态 ===${Font_color_suffix}"
+            if command -v ss &>/dev/null; then
+                ss -tunlp | grep -E "ss-rust|${port}" | grep -v grep
+            elif command -v netstat &>/dev/null; then
+                netstat -tunlp | grep -E "ss-rust|${port}" | grep -v grep
+            fi
+        fi
+    else
+        echo -e " 运行状态：${Red_font_prefix}未运行${Font_color_suffix}"
+        echo -e " ${Tip} 使用 ${Green_font_prefix}./ss22.sh${Font_color_suffix} 选择 ${Green_font_prefix}4.${Font_color_suffix} 启动服务"
     fi
+    
+    # 显示日志选项
+    echo -e "\n${Yellow_font_prefix}=== 日志查看选项 ===${Font_color_suffix}"
+    echo -e " ${Green_font_prefix}1.${Font_color_suffix} 查看最近 50 行日志"
+    echo -e " ${Green_font_prefix}2.${Font_color_suffix} 查看今日错误日志"
+    echo -e " ${Green_font_prefix}3.${Font_color_suffix} 实时跟踪日志"
+    echo -e " ${Green_font_prefix}0.${Font_color_suffix} 返回主菜单"
+    
+    read -e -p "请选择 [0-3]: " log_choice
+    [[ -z "${log_choice}" ]] && log_choice="0"
+    
+    case "$log_choice" in
+        1)
+            echo -e "\n${Yellow_font_prefix}=== 最近 50 行日志 ===${Font_color_suffix}"
+            journalctl -u ss-rust --no-pager -n 50
+            ;;
+        2)
+            echo -e "\n${Yellow_font_prefix}=== 今日错误日志 ===${Font_color_suffix}"
+            journalctl -u ss-rust --no-pager --since today | grep -i "error\|fail\|warn"
+            ;;
+        3)
+            echo -e "${Info} 按 Ctrl+C 退出日志跟踪..."
+            sleep 1
+            journalctl -u ss-rust -f --no-hostname
+            ;;
+        0|*)
+            # 不做任何操作，直接返回主菜单
+            ;;
+    esac
     
     Before_Start_Menu
 }
