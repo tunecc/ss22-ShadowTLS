@@ -2,7 +2,7 @@
 PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
 export PATH
 
-sh_ver="1.7.2"
+sh_ver="1.7.3"
 filepath=$(cd "$(dirname "$0")"; pwd)
 FOLDER="/etc/ss-rust"
 FILE="/usr/local/bin/ss-rust"
@@ -238,6 +238,45 @@ backup_Download() {
         echo -e "${Info} 备份源 Shadowsocks Rust 主程序安装完成！"
         return 0
     fi
+}
+
+# 获取当前安装版本
+get_current_version() {
+    if [[ -f "${VERSION_FILE}" ]]; then
+        current_ver=$(cat "${VERSION_FILE}")
+        echo "${current_ver}"
+    else
+        echo "0.0.0"
+    fi
+}
+
+# 版本号比较函数
+version_compare() {
+    local current=$1
+    local latest=$2
+    
+    # 移除版本号中的 'v' 前缀
+    current=${current#v}
+    latest=${latest#v}
+    
+    if [[ "${current}" == "${latest}" ]]; then
+        return 1  # 版本相同
+    fi
+    
+    # 将版本号分割为数组
+    IFS='.' read -r -a current_parts <<< "${current}"
+    IFS='.' read -r -a latest_parts <<< "${latest}"
+    
+    # 比较每个部分
+    for i in "${!current_parts[@]}"; do
+        if [[ "${current_parts[$i]}" -lt "${latest_parts[$i]}" ]]; then
+            return 0  # 当前版本低于最新版本
+        elif [[ "${current_parts[$i]}" -gt "${latest_parts[$i]}" ]]; then
+            return 1  # 当前版本高于最新版本
+        fi
+    done
+    
+    return 1
 }
 
 # 整合下载功能
@@ -861,10 +900,34 @@ Restart(){
 # 更新
 Update(){
     check_installed_status
+
+    # 获取当前版本
+    current_ver=$(get_current_version)
+    echo -e "${Info} 当前版本: [ ${current_ver} ]"
+    
+    # 获取最新版本
     check_new_ver
-    check_ver_comparison
-    echo -e "${Info} Shadowsocks Rust 更新完毕！"
-    sleep 1s
+    
+    # 比较版本
+    if version_compare "${current_ver}" "${new_ver}"; then
+        echo -e "${Info} 发现新版本 [ ${new_ver} ]"
+        echo -e "${Info} 是否更新？[Y/n]"
+        read -p "(默认: y)：" yn
+        [[ -z "${yn}" ]] && yn="y"
+        if [[ ${yn} == [Yy] ]]; then
+            echo -e "${Info} 开始更新 Shadowsocks Rust..."
+            detect_arch
+            download_ss "${new_ver#v}" "${OS_ARCH}"
+            systemctl restart ss-rust
+            echo -e "${Success} Shadowsocks Rust 已更新到最新版本 [ ${new_ver} ]"
+        else
+            echo -e "${Info} 已取消更新"
+        fi
+    else
+        echo -e "${Info} 当前已是最新版本 [ ${new_ver} ]，无需更新"
+    fi
+
+    sleep 2s
     Start_Menu
 }
 
@@ -964,52 +1027,24 @@ uninstall_shadowtls() {
     echo -e "${Green_font_prefix}ShadowTLS 已成功卸载${Font_color_suffix}"
 }
 
-# 获取IPv4地址
 getipv4(){
-    echo -e "${Info} 正在获取公网IPv4地址..."
-    local success=false
-    
-    for ip_service in "api.ipify.org" "ifconfig.me" "ip.sb"; do
-        echo -e "  尝试从 ${ip_service} 获取..."
-        ipv4=$(curl -s4 --connect-timeout 3 https://$ip_service)
-        
-        if [[ -n "${ipv4}" && "${ipv4}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo -e "  ${Green_font_prefix}成功${Font_color_suffix} 获取到IPv4地址: ${ipv4}"
-            success=true
-            break
-        else
-            echo -e "  ${Yellow_font_prefix}失败${Font_color_suffix} 无法从 ${ip_service} 获取有效IPv4地址"
-        fi
-    done
-    
-    if [[ "$success" != "true" ]]; then
-        echo -e "${Error} 所有IPv4地址获取服务均失败"
-        ipv4="IPv4_Error"
-    fi
+	ipv4=$(wget -qO- -4 -t1 -T2 ipinfo.io/ip)
+	if [[ -z "${ipv4}" ]]; then
+		ipv4=$(wget -qO- -4 -t1 -T2 api.ip.sb/ip)
+		if [[ -z "${ipv4}" ]]; then
+			ipv4=$(wget -qO- -4 -t1 -T2 members.3322.org/dyndns/getip)
+			if [[ -z "${ipv4}" ]]; then
+				ipv4="IPv4_Error"
+			fi
+		fi
+	fi
 }
 
-# 获取IPv6地址
 getipv6(){
-    echo -e "${Info} 正在获取公网IPv6地址..."
-    local success=false
-    
-    for ip_service in "api64.ipify.org" "ifconfig.co" "ipv6.icanhazip.com"; do
-        echo -e "  尝试从 ${ip_service} 获取..."
-        ipv6=$(curl -s6 --connect-timeout 3 https://$ip_service)
-        
-        if [[ -n "${ipv6}" ]]; then
-            echo -e "  ${Green_font_prefix}成功${Font_color_suffix} 获取到IPv6地址: ${ipv6}"
-            success=true
-            break
-        else
-            echo -e "  ${Yellow_font_prefix}失败${Font_color_suffix} 无法从 ${ip_service} 获取有效IPv6地址"
-        fi
-    done
-    
-    if [[ "$success" != "true" ]]; then
-        echo -e "${Warning} 所有IPv6地址获取服务均失败，您的服务器可能不支持IPv6"
-        ipv6="IPv6_Error"
-    fi
+	ipv6=$(wget -qO- -6 -t1 -T2 ifconfig.co)
+	if [[ -z "${ipv6}" ]]; then
+		ipv6="IPv6_Error"
+	fi
 }
 
 # Base64编码 (URL安全)
@@ -1026,6 +1061,12 @@ View(){
     # 获取公网IP地址
     getipv4
     getipv6
+
+    # 新增：如果 IPv4 和 IPv6 都获取失败，直接报错退出
+    if [[ "${ipv4}" == "IPv4_Error" && "${ipv6}" == "IPv6_Error" ]]; then
+        echo -e "${Error} 无法获取 IPv4 或 IPv6 地址，无法输出配置信息！"
+        return 1
+    fi
     
     echo -e "\n${Yellow_font_prefix}=== Shadowsocks Rust 配置 ===${Font_color_suffix}"
     [[ "${ipv4}" != "IPv4_Error" ]] && echo -e " IPv4 地址：${Green_font_prefix}${ipv4}${Font_color_suffix}"
@@ -1043,7 +1084,7 @@ View(){
     echo -e "——————————————————————————————————"
 
     # 生成 SS 链接
-    local userinfo=$(echo -n "${cipher}:${password}" | base64 | tr -d '\n')
+    local userinfo=$(echo -n "${cipher}:${password}" | tr -d '\n')
     local ss_url_ipv4=""
     local ss_url_ipv6=""
     
@@ -1102,7 +1143,7 @@ View(){
     if [ -f "/etc/systemd/system/shadowtls.service" ]; then
         # 生成 SS + ShadowTLS 合并链接
         local shadow_tls_config="{\"version\":\"3\",\"password\":\"${stls_password}\",\"host\":\"${stls_sni}\",\"port\":\"${stls_listen_port}\",\"address\":\"${ipv4}\"}"
-        local shadow_tls_base64=$(echo -n "${shadow_tls_config}" | base64 | tr -d '\n')
+        local shadow_tls_base64=$(echo -n "${shadow_tls_config}" | tr -d '\n')
         local ss_stls_url="ss://${userinfo}@${ipv4}:${port}?shadow-tls=${shadow_tls_base64}#ss-${ipv4}"
 
         echo -e "\n${Yellow_font_prefix}=== SS + ShadowTLS 链接 ===${Font_color_suffix}"
