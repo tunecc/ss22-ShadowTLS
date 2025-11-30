@@ -2,63 +2,165 @@
 PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
 export PATH
 
-sh_ver="1.7.3"
-filepath=$(cd "$(dirname "$0")"; pwd)
-FOLDER="/etc/ss-rust"
-FILE="/usr/local/bin/ss-rust"
-CONF="/etc/ss-rust/config.json"
-Now_ver_File="/etc/ss-rust/ver.txt"
+# 启用管道错误检测
+set -o pipefail
+
+sh_ver="1.7.4"
+filepath=$(cd "$(dirname "$0")" || exit; pwd)
+
+# 使用 readonly 保护常量
+readonly FOLDER="/etc/ss-rust"
+readonly FILE="/usr/local/bin/ss-rust"
+readonly CONF="/etc/ss-rust/config. json"
+readonly Now_ver_File="/etc/ss-rust/ver. txt"
+readonly BACKUP_DIR="/etc/ss-rust/backups"
+readonly LOG_FILE="/var/log/ss-rust-manager.log"
 
 # 颜色定义
-Green_font_prefix="\033[32m"
-Red_font_prefix="\033[31m"
-Green_background_prefix="\033[42;37m"
-Red_background_prefix="\033[41;37m"
-Font_color_suffix="\033[0m"
-Yellow_font_prefix="\033[0;33m"
-Cyan_font_prefix="\033[36m"
-Blue_font_prefix="\033[34m"
-Purple_background_prefix="\033[45;37m"
+readonly Green_font_prefix="\033[32m"
+readonly Red_font_prefix="\033[31m"
+readonly Green_background_prefix="\033[42;37m"
+readonly Red_background_prefix="\033[41;37m"
+readonly Font_color_suffix="\033[0m"
+readonly Yellow_font_prefix="\033[0;33m"
+readonly Cyan_font_prefix="\033[36m"
+readonly Blue_font_prefix="\033[34m"
+readonly Purple_background_prefix="\033[45;37m"
 
 # 消息类型
-Info="${Green_font_prefix}[信息]${Font_color_suffix}"
-Error="${Red_font_prefix}[错误]${Font_color_suffix}"
-Tip="${Yellow_font_prefix}[注意]${Font_color_suffix}"
-Warning="${Yellow_font_prefix}[警告]${Font_color_suffix}"
+readonly Info="${Green_font_prefix}[信息]${Font_color_suffix}"
+readonly Error="${Red_font_prefix}[错误]${Font_color_suffix}"
+readonly Tip="${Yellow_font_prefix}[注意]${Font_color_suffix}"
+readonly Warning="${Yellow_font_prefix}[警告]${Font_color_suffix}"
 
-# 显示进度条函数
+# 加密方式数组
+declare -A CIPHERS=(
+    [1]="aes-128-gcm"
+    [2]="aes-256-gcm"
+    [3]="chacha20-ietf-poly1305"
+    [4]="plain"
+    [5]="none"
+    [6]="table"
+    [7]="aes-128-cfb"
+    [8]="aes-256-cfb"
+    [9]="aes-256-ctr"
+    [10]="camellia-256-cfb"
+    [11]="rc4-md5"
+    [12]="chacha20-ietf"
+    [13]="2022-blake3-aes-128-gcm"
+    [14]="2022-blake3-aes-256-gcm"
+    [15]="2022-blake3-chacha20-poly1305"
+    [16]="2022-blake3-chacha8-poly1305"
+)
+
+# 清理函数
+cleanup() {
+    local exit_code=$? 
+    rm -f /tmp/config. json.tmp 2>/dev/null
+    rm -f /tmp/config.json 2>/dev/null
+    rm -f /tmp/ss-rust-download.* 2>/dev/null
+    exit $exit_code
+}
+trap cleanup EXIT
+
+# 日志记录函数
+write_log() {
+    local level=$1
+    shift
+    local message="$*"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] [$level] $message" >> "$LOG_FILE" 2>/dev/null
+}
+
+# 统一日志输出函数
+log_info()    { echo -e "${Info} $*"; write_log "INFO" "$*"; }
+log_error()   { echo -e "${Error} $*"; write_log "ERROR" "$*"; }
+log_warning() { echo -e "${Warning} $*"; write_log "WARN" "$*"; }
+log_tip()     { echo -e "${Tip} $*"; }
+
+# 确认提示函数
+confirm() {
+    local prompt="${1:-确认操作? }"
+    local default="${2:-n}"
+    local response
+    
+    if [[ "$default" == "y" ]]; then
+        read -e -p "$prompt [Y/n]: " response
+        [[ -z "$response" || "$response" =~ ^[Yy] ]]
+    else
+        read -e -p "$prompt [y/N]: " response
+        [[ "$response" =~ ^[Yy] ]]
+    fi
+}
+
+# 端口验证函数
+validate_port() {
+    local port=$1
+    if !  [[ "$port" =~ ^[0-9]+$ ]] || [[ $port -lt 1 ]] || [[ $port -gt 65535 ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# 服务状态管理函数
+ensure_service_running() {
+    local service_name=$1
+    local action=$2
+    
+    systemctl "$action" "$service_name"
+    sleep 1
+    
+    local status
+    status=$(systemctl is-active "$service_name" 2>/dev/null)
+    case "$action" in
+        start|restart)
+            [[ "$status" == "active" ]] && return 0 || return 1
+            ;;
+        stop)
+            [[ "$status" != "active" ]] && return 0 || return 1
+            ;;
+    esac
+}
+
+# 带重试的下载函数
+download_with_retry() {
+    local url=$1
+    local output=$2
+    local max_retries=${3:-3}
+    local retry=0
+    
+    while [[ $retry -lt $max_retries ]]; do
+        if wget --no-check-certificate -q --show-progress -O "$output" "$url" 2>/dev/null || \
+           wget --no-check-certificate -N "$url" -O "$output" 2>/dev/null; then
+            [[ -f "$output" && -s "$output" ]] && return 0
+        fi
+        ((retry++))
+        log_warning "下载失败，正在重试 ($retry/$max_retries)..."
+        sleep 2
+    done
+    return 1
+}
+
+# 显示进度条函数（优化版）
 show_progress() {
     local duration=$1
-    local sleep_interval=0.1
-    local steps=$(echo "$duration / $sleep_interval" | bc)
     local width=50
+    local delay
+    delay=$(awk "BEGIN {printf \"%.3f\", $duration / $width}")
     
-    echo -n "["
+    printf "["
     for ((i=0; i<width; i++)); do
-        echo -n " "
+        printf "#"
+        sleep "$delay"
     done
-    echo -n "]"
-    echo -ne "\r["
-    
-    for ((i=0; i<width; i++)); do
-        echo -n "#"
-        sleep $(echo "$duration / $width" | bc -l)
-        echo -ne "\r["
-        for ((j=0; j<=i; j++)); do
-            echo -n "#"
-        done
-        for ((j=i+1; j<width; j++)); do
-            echo -n " "
-        done
-        echo -n "]"
-    done
-    echo
+    printf "]\n"
 }
 
 # 检查是否为ROOT用户
 check_root(){
     if [[ $EUID != 0 ]]; then
-        echo -e "${Error} 当前非ROOT账号(或没有ROOT权限)，无法继续操作，请更换ROOT账号或使用 ${Green_background_prefix}sudo su${Font_color_suffix} 命令获取临时ROOT权限（执行后可能会提示输入当前账号的密码）。" 
+        log_error "当前非ROOT账号(或没有ROOT权限)，无法继续操作，请更换ROOT账号或使用 ${Green_background_prefix}sudo su${Font_color_suffix} 命令获取临时ROOT权限（执行后可能会提示输入当前账号的密码）。"
         exit 1
     fi
 }
@@ -67,42 +169,67 @@ check_root(){
 check_sys(){
     if [[ -f /etc/redhat-release ]]; then
         release="centos"
-    elif cat /etc/issue | grep -q -E -i "debian"; then
+    elif grep -q -E -i "debian" /etc/issue 2>/dev/null; then
         release="debian"
-    elif cat /etc/issue | grep -q -E -i "ubuntu"; then
+    elif grep -q -E -i "ubuntu" /etc/issue 2>/dev/null; then
         release="ubuntu"
-    elif cat /etc/issue | grep -q -E -i "centos|red hat|redhat"; then
+    elif grep -q -E -i "centos|red hat|redhat" /etc/issue 2>/dev/null; then
         release="centos"
-    elif cat /proc/version | grep -q -E -i "debian"; then
+    elif grep -q -E -i "debian" /proc/version 2>/dev/null; then
         release="debian"
-    elif cat /proc/version | grep -q -E -i "ubuntu"; then
+    elif grep -q -E -i "ubuntu" /proc/version 2>/dev/null; then
         release="ubuntu"
-    elif cat /proc/version | grep -q -E -i "centos|red hat|redhat"; then
+    elif grep -q -E -i "centos|red hat|redhat" /proc/version 2>/dev/null; then
         release="centos"
     else
-        echo -e "${Error} 未能识别系统类型，请联系脚本作者！"
+        log_error "未能识别系统类型，请联系脚本作者！"
         exit 1
     fi
 }
 
 # 检测系统架构
 sysArch() {
+    local uname
     uname=$(uname -m)
-    if [[ "$uname" == "i686" ]] || [[ "$uname" == "i386" ]]; then
-        arch="i686"
-    elif [[ "$uname" == *"armv7"* ]] || [[ "$uname" == "armv6l" ]]; then
-        arch="arm"
-    elif [[ "$uname" == *"armv8"* ]] || [[ "$uname" == "aarch64" ]]; then
-        arch="aarch64"
-    else
-        arch="x86_64"
-    fi
+    log_info "正在检测系统架构，当前 uname: ${uname}"
+    
+    case "$uname" in
+        i386|i686)
+            arch="i686"
+            target_triple="i686-unknown-linux-gnu"
+            ;;
+        x86_64|amd64)
+            arch="x86_64"
+            target_triple="x86_64-unknown-linux-gnu"
+            ;;
+        aarch64|armv8)
+            arch="aarch64"
+            target_triple="aarch64-unknown-linux-gnu"
+            ;;
+        armv7*)
+            arch="armv7"
+            if grep -q "gnueabihf" /proc/cpuinfo 2>/dev/null || [[ -f /lib/arm-linux-gnueabihf/libc.so.6 ]]; then
+                target_triple="armv7-unknown-linux-gnueabihf"
+            else
+                target_triple="arm-unknown-linux-gnueabi"
+            fi
+            ;;
+        arm*)
+            arch="arm"
+            target_triple="arm-unknown-linux-gnueabi"
+            ;;
+        *)
+            log_error "不支持的系统架构: ${uname}"
+            exit 1
+            ;;
+    esac
+    log_info "架构检测结果: ${Green_font_prefix}${target_triple}${Font_color_suffix}"
 }
 
 # 检查是否已安装
 check_installed_status(){
-    if [[ ! -e ${FILE} ]]; then
-        echo -e "${Error} Shadowsocks Rust 没有安装，请检查！" 
+    if [[ !  -e ${FILE} ]]; then
+        log_error "Shadowsocks Rust 没有安装，请检查！"
         Before_Start_Menu
     fi
 }
@@ -110,230 +237,233 @@ check_installed_status(){
 # 检查服务状态
 check_status(){
     status=$(systemctl status ss-rust 2>/dev/null | grep Active | awk '{print $3}' | cut -d "(" -f2 | cut -d ")" -f1)
-    if [[ -z "$status" ]]; then
-        status="unknown"
-    fi
+    [[ -z "$status" ]] && status="unknown"
 }
 
 # 检查端口占用
 check_port_occupied(){
     local port=$1
-    local occupied=$(lsof -i:${port} -t)
-    if [[ -n "$occupied" ]]; then
-        return 0  # 端口已占用
-    else
-        return 1  # 端口未占用
+    local occupied
+    occupied=$(lsof -i:"${port}" -t 2>/dev/null)
+    [[ -n "$occupied" ]]
+}
+
+# 检查配置文件权限
+check_config_permissions() {
+    if [[ -f "${CONF}" ]]; then
+        local perms
+        perms=$(stat -c %a "${CONF}" 2>/dev/null)
+        if [[ "$perms" != "600" ]]; then
+            chmod 600 "${CONF}"
+            log_info "已修复配置文件权限为 600"
+        fi
+    fi
+}
+
+# 验证配置文件JSON格式
+validate_config() {
+    if [[ ! -f "${CONF}" ]]; then
+        return 1
+    fi
+    if ! jq empty "${CONF}" 2>/dev/null; then
+        log_error "配置文件 JSON 格式无效！"
+        return 1
+    fi
+    return 0
+}
+
+# 备份配置文件
+backup_config() {
+    mkdir -p "$BACKUP_DIR"
+    local backup_file="${BACKUP_DIR}/config_$(date +%Y%m%d_%H%M%S).json"
+    
+    if [[ -f "${CONF}" ]]; then
+        cp "${CONF}" "$backup_file"
+        # 保留最近 5 个备份
+        ls -t "${BACKUP_DIR}"/config_*. json 2>/dev/null | tail -n +6 | xargs -r rm -f
+        log_info "配置已备份到: $backup_file"
     fi
 }
 
 # 获取最新版本
 check_new_ver(){
-    echo -e "${Info} 正在检查最新版本..."
-    new_ver=$(wget -qO- --no-check-certificate https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases | jq -r '[.[] | select(.prerelease == false) | select(.draft == false) | .tag_name] | .[0]' 2>/dev/null)
+    log_info "正在检查最新版本..."
+    new_ver=$(wget -qO- --no-check-certificate https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases 2>/dev/null | jq -r '[.[] | select(.prerelease == false) | select(.draft == false) | .tag_name] | .[0]' 2>/dev/null)
+    
     if [[ -z ${new_ver} ]]; then
-        echo -e "${Error} 获取 Shadowsocks Rust 最新版本失败！"
-        read -e -p "是否继续使用默认版本安装？[Y/n]" continue_install
-        [[ -z "$continue_install" ]] && continue_install="y"
-        if [[ "$continue_install" == [Yy] ]]; then
-            new_ver="v1.15.2" # 默认版本
-            echo -e "${Info} 将使用默认版本 ${new_ver} 继续安装"
+        log_error "获取 Shadowsocks Rust 最新版本失败！"
+        if confirm "是否继续使用默认版本安装？" "y"; then
+            new_ver="v1.18.4"
+            log_info "将使用默认版本 ${new_ver} 继续安装"
         else
-            echo -e "${Info} 已取消安装"
+            log_info "已取消安装"
             exit 1
         fi
     else
-        echo -e "${Info} 检测到 Shadowsocks Rust 最新版本为 ${Green_font_prefix}${new_ver}${Font_color_suffix}"
+        log_info "检测到 Shadowsocks Rust 最新版本为 ${Green_font_prefix}${new_ver}${Font_color_suffix}"
     fi
 }
 
 # 比较版本
 check_ver_comparison(){
+    local now_ver
     now_ver=$(cat ${Now_ver_File} 2>/dev/null)
+    
     if [[ "${now_ver}" != "${new_ver}" ]]; then
-        echo -e "${Info} 发现 Shadowsocks Rust 已有新版本 ${Green_font_prefix}${new_ver}${Font_color_suffix}，旧版本 ${Red_font_prefix}${now_ver}${Font_color_suffix}"
-        read -e -p "是否更新？[Y/n]：" yn
-        [[ -z "${yn}" ]] && yn="y"
-        if [[ $yn == [Yy] ]]; then
+        log_info "发现 Shadowsocks Rust 已有新版本 ${Green_font_prefix}${new_ver}${Font_color_suffix}，旧版本 ${Red_font_prefix}${now_ver}${Font_color_suffix}"
+        
+        if confirm "是否更新？" "y"; then
             check_status
-            
+            backup_config
             \cp "${CONF}" "/tmp/config.json"
             
-            Download
-            if [[ $? -eq 0 ]]; then
+            if Download; then
                 mv -f "/tmp/config.json" "${CONF}"
-                chmod 600 "${CONF}"  # 限制配置文件权限
-                echo -e "${Info} 配置文件已恢复"
+                chmod 600 "${CONF}"
+                log_info "配置文件已恢复"
                 Restart
             else
-                echo -e "${Error} 更新失败，将恢复配置文件"
+                log_error "更新失败，将恢复配置文件"
                 if [[ -f "/tmp/config.json" ]]; then
                     mv -f "/tmp/config.json" "${CONF}"
-                    echo -e "${Info} 已从临时备份恢复配置"
+                    log_info "已从临时备份恢复配置"
                 fi
             fi
         fi
     else
-        echo -e "${Info} 当前 Shadowsocks Rust 已是最新版本 ${Green_font_prefix}${new_ver}${Font_color_suffix} ！"
+        log_info "当前 Shadowsocks Rust 已是最新版本 ${Green_font_prefix}${new_ver}${Font_color_suffix} ！"
         exit 1
     fi
 }
 
 # 官方源下载
 stable_Download() {
-    echo -e "${Info} 开始下载官方源 Shadowsocks Rust..."
-    download_url="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${new_ver}/shadowsocks-${new_ver}.${arch}-unknown-linux-gnu.tar.xz"
+    log_info "开始下载官方源 Shadowsocks Rust..."
     
-    echo -e "${Info} 下载地址: ${download_url}"
-    wget --no-check-certificate -N "${download_url}"
+    local filename="shadowsocks-${new_ver}.${target_triple}.tar.xz"
+    local download_url="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${new_ver}/${filename}"
     
-    if [[ $? -ne 0 ]] || [[ ! -e "shadowsocks-${new_ver}.${arch}-unknown-linux-gnu.tar.xz" ]]; then
-        echo -e "${Error} Shadowsocks Rust 官方源下载失败！"
+    log_info "下载地址: ${download_url}"
+    
+    if !  download_with_retry "$download_url" "$filename" 3; then
+        log_error "Shadowsocks Rust 官方源下载失败！"
         return 1
-    else
-        echo -e "${Info} 下载成功，开始解压..."
-        tar -xJf "shadowsocks-${new_ver}.${arch}-unknown-linux-gnu.tar.xz"
-        
-        if [[ $? -ne 0 ]] || [[ ! -e "ssserver" ]]; then
-            echo -e "${Error} Shadowsocks Rust 解压失败！"
-            return 1
-        else
-            echo -e "${Info} 解压成功，开始安装..."
-            rm -rf "shadowsocks-${new_ver}.${arch}-unknown-linux-gnu.tar.xz"
-            chmod +x ssserver
-            mv -f ssserver "${FILE}"
-            rm -f sslocal ssmanager ssservice ssurl 2>/dev/null
-            echo "${new_ver}" > ${Now_ver_File}
-            echo -e "${Info} Shadowsocks Rust 主程序安装完成！"
-            return 0
-        fi
     fi
+    
+    if [[ !  -e "${filename}" ]]; then
+        log_error "下载文件不存在！"
+        return 1
+    fi
+    
+    log_info "下载成功，开始解压..."
+    if ! tar -xJf "${filename}"; then
+        log_error "Shadowsocks Rust 解压失败！"
+        rm -f "${filename}"
+        return 1
+    fi
+    
+    if [[ !  -e "ssserver" ]]; then
+        log_error "解压后未找到 ssserver 文件！"
+        rm -f "${filename}"
+        return 1
+    fi
+    
+    log_info "解压成功，开始安装..."
+    rm -rf "${filename}"
+    chmod +x ssserver
+    mv -f ssserver "${FILE}"
+    rm -f sslocal ssmanager ssservice ssurl 2>/dev/null
+    echo "${new_ver}" > ${Now_ver_File}
+    log_info "Shadowsocks Rust 主程序安装完成！"
+    return 0
 }
 
 # 备用源下载
 backup_Download() {
-    echo -e "${Info} 尝试使用备份源下载（旧版本）Shadowsocks Rust..."
-    local backup_ver="v1.14.3"
-    local backup_url="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${backup_ver}/shadowsocks-${backup_ver}.${arch}-unknown-linux-gnu.tar.xz"
+    log_info "尝试使用备份源下载（旧版本）Shadowsocks Rust..."
+    local backup_ver="v1.18.4"
     
-    if [ ! -e "shadowsocks-${backup_ver}.${arch}-unknown-linux-gnu.tar.xz" ]; then
-        wget --no-check-certificate -N "${backup_url}"
-        
-        if [[ $? -ne 0 ]] || [[ ! -e "shadowsocks-${backup_ver}.${arch}-unknown-linux-gnu.tar.xz" ]]; then
-            echo -e "${Error} 从备份源下载 Shadowsocks Rust 失败！"
+    local filename="shadowsocks-${backup_ver}.${target_triple}. tar.xz"
+    local backup_url="https://gh-proxy.com/https://github.com/shadowsocks/shadowsocks-rust/releases/download/${backup_ver}/${filename}"
+    
+    if [[ ! -e "${filename}" ]]; then
+        if ! download_with_retry "$backup_url" "$filename" 3; then
+            log_error "从备份源下载 Shadowsocks Rust 失败！"
             return 1
         fi
     fi
     
-    tar -xJf "shadowsocks-${backup_ver}.${arch}-unknown-linux-gnu.tar.xz"
-    
-    if [[ $? -ne 0 ]] || [[ ! -e "ssserver" ]]; then
-        echo -e "${Error} 备份源 Shadowsocks Rust 解压失败！"
+    if !  tar -xJf "${filename}"; then
+        log_error "备份源 Shadowsocks Rust 解压失败！"
+        rm -f "${filename}"
         return 1
-    else
-        rm -rf "shadowsocks-${backup_ver}.${arch}-unknown-linux-gnu.tar.xz"
-        chmod +x ssserver
-        mv -f ssserver "${FILE}"
-        rm -f sslocal ssmanager ssservice ssurl 2>/dev/null
-        echo "${backup_ver}" > ${Now_ver_File}
-        echo -e "${Info} 备份源 Shadowsocks Rust 主程序安装完成！"
-        return 0
-    fi
-}
-
-# 获取当前安装版本
-get_current_version() {
-    if [[ -f "${VERSION_FILE}" ]]; then
-        current_ver=$(cat "${VERSION_FILE}")
-        echo "${current_ver}"
-    else
-        echo "0.0.0"
-    fi
-}
-
-# 版本号比较函数
-version_compare() {
-    local current=$1
-    local latest=$2
-    
-    # 移除版本号中的 'v' 前缀
-    current=${current#v}
-    latest=${latest#v}
-    
-    if [[ "${current}" == "${latest}" ]]; then
-        return 1  # 版本相同
     fi
     
-    # 将版本号分割为数组
-    IFS='.' read -r -a current_parts <<< "${current}"
-    IFS='.' read -r -a latest_parts <<< "${latest}"
+    if [[ ! -e "ssserver" ]]; then
+        log_error "解压后未找到 ssserver 文件！"
+        rm -f "${filename}"
+        return 1
+    fi
     
-    # 比较每个部分
-    for i in "${!current_parts[@]}"; do
-        if [[ "${current_parts[$i]}" -lt "${latest_parts[$i]}" ]]; then
-            return 0  # 当前版本低于最新版本
-        elif [[ "${current_parts[$i]}" -gt "${latest_parts[$i]}" ]]; then
-            return 1  # 当前版本高于最新版本
-        fi
-    done
-    
-    return 1
+    rm -rf "${filename}"
+    chmod +x ssserver
+    mv -f ssserver "${FILE}"
+    rm -f sslocal ssmanager ssservice ssurl 2>/dev/null
+    echo "${backup_ver}" > ${Now_ver_File}
+    log_info "备份源 Shadowsocks Rust 主程序安装完成！"
+    return 0
 }
 
 # 整合下载功能
 Download() {
-    if [[ ! -d "${FOLDER}" ]]; then
-        mkdir -p "${FOLDER}" || {
-            echo -e "${Error} 创建文件夹 ${FOLDER} 失败，请检查权限！"
+    if [[ !  -d "${FOLDER}" ]]; then
+        if !  mkdir -p "${FOLDER}"; then
+            log_error "创建文件夹 ${FOLDER} 失败，请检查权限！"
             exit 1
-        }
-        echo -e "${Info} 创建目录 ${FOLDER} 成功"
+        fi
+        log_info "创建目录 ${FOLDER} 成功"
     fi
     
-    # 尝试官方源下载
-    stable_Download
-    if [[ $? != 0 ]]; then
-        echo -e "${Warning} 官方源下载失败，尝试备用源..."
-        backup_Download
-        if [[ $? != 0 ]]; then
-            echo -e "${Error} 所有下载源均失败，无法继续安装！"
-            return 1
-        fi
+    if stable_Download; then
+        return 0
     fi
-    return 0
+    
+    log_warning "官方源下载失败，尝试备用源..."
+    if backup_Download; then
+        return 0
+    fi
+    
+    log_error "所有下载源均失败，无法继续安装！"
+    return 1
 }
 
 # 创建服务
 Service(){
-    # 检测宿主机虚拟化类型
     local virt_type
     virt_type="$(systemd-detect-virt 2>/dev/null || echo "unknown")"
-    echo -e "${Info} 检测到虚拟化类型: ${Green_font_prefix}${virt_type}${Font_color_suffix}"
+    log_info "检测到虚拟化类型: ${Green_font_prefix}${virt_type}${Font_color_suffix}"
     
-    # 准备服务文件内容
-    local service_content='
-[Unit]
+    local service_content='[Unit]
 Description=Shadowsocks Rust Service
 Documentation=https://github.com/shadowsocks/shadowsocks-rust
 After=network-online.target
 Wants=network-online.target systemd-networkd-wait-online.service
 
 [Service]
-LimitNOFILE=32768
+LimitNOFILE=1048576
 Type=simple
 User=root
 Restart=on-failure
 RestartSec=5s'
     
-    # 根据虚拟化类型决定是否添加 ExecStartPre
     if [[ "$virt_type" == "kvm" ]]; then
         service_content+='
 ExecStartPre=/bin/sh -c '\''ulimit -n 51200'\'''
-        echo -e "${Info} 检测到KVM虚拟化环境，已添加 ExecStartPre 配置以提高性能"
+        log_info "检测到KVM虚拟化环境，已添加 ExecStartPre 配置以提高性能"
     else
-        echo -e "${Info} 检测到${virt_type}虚拟化环境，不添加额外的性能优化配置"
+        log_info "检测到${virt_type}虚拟化环境，不添加额外的性能优化配置"
     fi
     
-    # 完成服务文件内容
     service_content+='
 ExecStart=/usr/local/bin/ss-rust -c /etc/ss-rust/config.json
 ExecReload=/bin/kill -HUP $MAINPID
@@ -341,74 +471,76 @@ ExecReload=/bin/kill -HUP $MAINPID
 [Install]
 WantedBy=multi-user.target'
     
-    # 写入服务文件
-    echo -e "${Info} 正在创建系统服务..."
+    log_info "正在创建系统服务..."
     echo "$service_content" > /etc/systemd/system/ss-rust.service
     
-    # 启用服务
     systemctl daemon-reload
     systemctl enable ss-rust
     
-    echo -e "${Info} Shadowsocks Rust 服务配置完成！"
+    log_info "Shadowsocks Rust 服务配置完成！"
 }
 
 # 安装依赖
 Installation_dependency(){
-    echo -e "${Info} 正在安装/更新必要组件..."
+    log_info "正在安装/更新必要组件..."
     
-    # 检查是否安装了必要的组件
     local packages_to_install=""
-    local check_commands=("jq" "wget" "curl" "openssl" "lsof")
+    local check_commands=("jq" "wget" "curl" "openssl" "lsof" "tar")
     
     for cmd in "${check_commands[@]}"; do
-        if ! command -v $cmd &>/dev/null; then
+        if ! command -v "$cmd" &>/dev/null; then
             case $cmd in
-                "jq") packages_to_install+=" jq" ;;
-                "wget") packages_to_install+=" wget" ;;
-                "curl") packages_to_install+=" curl" ;;
-                "openssl") packages_to_install+=" openssl" ;;
-                "lsof") packages_to_install+=" lsof" ;;
+                "jq"|"wget"|"curl"|"openssl"|"lsof"|"tar")
+                    packages_to_install+=" $cmd"
+                    ;;
             esac
         fi
     done
     
-    # 根据系统类型安装缺少的组件
     if [[ -n $packages_to_install ]]; then
-        echo -e "${Info} 检测到缺少以下组件:${Green_font_prefix}${packages_to_install}${Font_color_suffix}"
+        log_info "检测到缺少以下组件:${Green_font_prefix}${packages_to_install}${Font_color_suffix}"
         
         if [[ ${release} == "centos" ]]; then
-            echo -e "${Info} 更新并安装组件中..."
+            log_info "更新并安装组件中..."
             yum update -y
+            # shellcheck disable=SC2086
             yum install -y $packages_to_install xz unzip gzip
         else
-            echo -e "${Info} 更新并安装组件中..."
+            log_info "更新并安装组件中..."
             apt-get update
+            # shellcheck disable=SC2086
             apt-get install -y $packages_to_install xz-utils unzip gzip
         fi
         
-        if [ $? -ne 0 ]; then
-            echo -e "${Error} 安装组件失败，请手动安装后重试！"
+        if [[ $? -ne 0 ]]; then
+            log_error "安装组件失败，请手动安装后重试！"
             exit 1
         fi
     else
-        echo -e "${Info} 所需组件已安装，跳过安装步骤"
+        log_info "所需组件已安装，跳过安装步骤"
     fi
     
-    # 设置时区
-    echo -e "${Info} 正在设置系统时区为 Asia/Shanghai..."
-    if [ -f "/usr/share/zoneinfo/Asia/Shanghai" ]; then
+    log_info "正在设置系统时区为 Asia/Shanghai..."
+    if [[ -f "/usr/share/zoneinfo/Asia/Shanghai" ]]; then
         ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
         echo "Asia/Shanghai" > /etc/timezone
-        echo -e "${Info} 时区设置完成"
+        log_info "时区设置完成"
     else
-        echo -e "${Warning} 时区文件不存在，跳过设置"
+        log_warning "时区文件不存在，跳过设置"
     fi
 }
 
 # 写入配置文件
 Write_config(){
-    echo -e "${Info} 正在生成配置文件..."
-    cat > ${CONF}<<-EOF
+    log_info "正在生成配置文件..."
+    
+    local dns_config=""
+    if [[ -n "${dns}" ]]; then
+        dns_config=",
+    \"nameserver\": \"${dns}\""
+    fi
+    
+    cat > "${CONF}" <<-EOF
 {
     "server": "::",
     "server_port": ${port},
@@ -418,65 +550,64 @@ Write_config(){
     "mode": "tcp_and_udp",
     "user": "nobody",
     "timeout": 300,
-    "ecn": ${ecn}${dns:+",\n    \"nameserver\":\"${dns}\""}
+    "ecn": ${ecn}${dns_config}
 }
 EOF
     
-    # 设置配置文件权限
-    chmod 600 ${CONF}
-    echo -e "${Info} 配置文件已生成并设置适当权限"
-}
-
-# 读取配置文件
-Read_config(){
-    if [[ ! -e ${CONF} ]]; then
-        echo -e "${Error} Shadowsocks Rust 配置文件不存在！" 
-        return 1  # 返回错误而不是退出脚本
+    chmod 600 "${CONF}"
+    
+    if !  validate_config; then
+        log_error "生成的配置文件格式无效，请检查！"
+        return 1
     fi
     
-    # 读取基础配置
-    port=$(cat ${CONF} | jq -r '.server_port')
-    password=$(cat ${CONF} | jq -r '.password')
-    cipher=$(cat ${CONF} | jq -r '.method')
-    tfo=$(cat ${CONF} | jq -r '.fast_open')
-    dns=$(cat ${CONF} | jq -r '.nameserver // empty')
+    log_info "配置文件已生成并设置适当权限"
+    return 0
+}
+
+# 读取配置文件（优化版）
+Read_config(){
+    if [[ !  -e ${CONF} ]]; then
+        log_error "Shadowsocks Rust 配置文件不存在！"
+        return 1
+    fi
     
-    # 从配置文件中读取ecn状态，如果不存在使用默认值
-    ecn=$(cat ${CONF} | jq -r '.ecn // false')
+    if ! validate_config; then
+        return 1
+    fi
+    
+    # 一次性读取所有配置
+    port=$(jq -r '.server_port' "${CONF}")
+    password=$(jq -r '.password' "${CONF}")
+    cipher=$(jq -r '. method' "${CONF}")
+    tfo=$(jq -r '. fast_open' "${CONF}")
+    dns=$(jq -r '.nameserver // empty' "${CONF}")
+    ecn=$(jq -r '. ecn // false' "${CONF}")
+    
     return 0
 }
 
 # 设置端口
 Set_port(){
-    while true
-    do
-        echo -e "${Tip} 本步骤不涉及系统防火墙端口操作，请手动放行相应端口！"
+    while true; do
+        log_tip "脚本稍后将尝试自动配置防火墙开放此端口。"
         echo -e "请输入 Shadowsocks Rust 端口 [1-65535]"
         read -e -p "(回车随机生成)：" port
         
-        # 如果用户未输入，随机生成端口
         if [[ -z "${port}" ]]; then
             while true; do
                 port=$(shuf -i 9000-19999 -n 1)
-                check_port_occupied $port || break
+                check_port_occupied "$port" || break
             done
-            echo -e "${Info} 已随机生成端口: ${Green_font_prefix}${port}${Font_color_suffix}"
+            log_info "已随机生成端口: ${Green_font_prefix}${port}${Font_color_suffix}"
         else
-            # 检查是否为有效数字
-            if ! [[ "$port" =~ ^[0-9]+$ ]]; then
-                echo -e "${Error} 请输入有效的数字!"
+            if !  validate_port "$port"; then
+                log_error "请输入有效的端口号 (1-65535)!"
                 continue
             fi
             
-            # 检查端口范围
-            if [[ ${port} -lt 1 ]] || [[ ${port} -gt 65535 ]]; then
-                echo -e "${Error} 端口范围错误，请输入 1-65535 之间的数字!"
-                continue
-            fi
-            
-            # 检查端口是否被占用
-            if check_port_occupied $port; then
-                echo -e "${Error} 端口 ${port} 已被占用，请更换其他端口!"
+            if check_port_occupied "$port"; then
+                log_error "端口 ${port} 已被占用，请更换其他端口!"
                 continue
             fi
         fi
@@ -488,38 +619,90 @@ Set_port(){
     done
 }
 
+# 配置防火墙
+Config_Firewall(){
+    local port_to_open=$1
+    log_info "正在检查并配置防火墙..."
+    
+    # 检查 UFW
+    if command -v ufw >/dev/null 2>&1; then
+        if ufw status | grep -qw active; then
+            log_info "检测到 UFW 防火墙，正在添加规则..."
+            ufw allow "${port_to_open}/tcp"
+            ufw allow "${port_to_open}/udp"
+            log_info "UFW: 已放行端口 ${port_to_open}"
+        fi
+    fi
+    
+    # 检查 Firewalld
+    if command -v firewall-cmd >/dev/null 2>&1; then
+        if firewall-cmd --state 2>/dev/null | grep -q running; then
+            log_info "检测到 Firewalld 防火墙，正在添加规则..."
+            firewall-cmd --zone=public --add-port="${port_to_open}/tcp" --permanent
+            firewall-cmd --zone=public --add-port="${port_to_open}/udp" --permanent
+            firewall-cmd --reload
+            log_info "Firewalld: 已放行端口 ${port_to_open}"
+        fi
+    fi
+
+    # 检查 iptables
+    if command -v iptables >/dev/null 2>&1; then
+        if !  command -v ufw >/dev/null 2>&1 && ! command -v firewall-cmd >/dev/null 2>&1; then
+            log_info "检测到 iptables，正在添加规则..."
+            if !  iptables -C INPUT -p tcp --dport "${port_to_open}" -j ACCEPT 2>/dev/null; then
+                iptables -I INPUT -p tcp --dport "${port_to_open}" -j ACCEPT
+            fi
+            if ! iptables -C INPUT -p udp --dport "${port_to_open}" -j ACCEPT 2>/dev/null; then
+                iptables -I INPUT -p udp --dport "${port_to_open}" -j ACCEPT
+            fi
+            
+            if [[ -f /etc/redhat-release ]]; then
+                service iptables save 2>/dev/null || /usr/libexec/iptables/iptables.init save 2>/dev/null
+            else
+                iptables-save > /etc/iptables. rules 2>/dev/null
+                log_warning "Debian/Ubuntu 系统提示：如未使用 UFW，建议安装 iptables-persistent 以确保重启后规则不丢失。"
+            fi
+            log_info "iptables: 已放行端口 ${port_to_open}"
+        fi
+    fi
+}
+
 # 设置TCP Fast Open
 Set_tfo(){
     echo -e "是否开启 TCP Fast Open ？"
-    echo -e "${Tip} 开启此选项仅修改 Shadowsocks 配置，不会自动修改系统参数"
+    log_tip "开启此选项仅修改 Shadowsocks 配置，不会自动修改系统参数"
     
-    # 检查系统是否支持TFO
     local tfo_available=false
     if [[ -f /proc/sys/net/ipv4/tcp_fastopen ]]; then
-        local tfo_status=$(cat /proc/sys/net/ipv4/tcp_fastopen)
+        local tfo_status
+        tfo_status=$(cat /proc/sys/net/ipv4/tcp_fastopen)
         if [[ $tfo_status -gt 0 ]]; then
             tfo_available=true
-            echo -e "${Info} 系统已启用 TCP Fast Open，状态值: ${tfo_status}"
+            log_info "系统已启用 TCP Fast Open，状态值: ${tfo_status}"
         else
-            echo -e "${Warning} 系统未启用 TCP Fast Open，如需完全启用，请手动执行: echo 3 > /proc/sys/net/ipv4/tcp_fastopen"
+            log_warning "系统未启用 TCP Fast Open，如需完全启用，请手动执行: echo 3 > /proc/sys/net/ipv4/tcp_fastopen"
         fi
     else
-        echo -e "${Warning} 系统不支持 TCP Fast Open"
+        log_warning "系统不支持 TCP Fast Open"
     fi
     
     echo "=================================="
-    echo -e " ${Green_font_prefix}1.${Font_color_suffix} 启用"
+    echo -e " ${Green_font_prefix}1. ${Font_color_suffix} 启用"
     echo -e " ${Green_font_prefix}2.${Font_color_suffix} 禁用 (默认)"
     echo "=================================="
     
     read -e -p "(默认: 2): " tfo_choice
     [[ -z "${tfo_choice}" ]] && tfo_choice="2"
-    
+
     if [[ ${tfo_choice} == "1" ]]; then
         tfo=true
         if [[ "$tfo_available" == "false" ]]; then
-            echo -e "${Warning} 您已在 Shadowsocks 中启用 TCP Fast Open，但系统未开启此功能，实际效果可能受限"
-            echo -e "${Tip} 建议执行以下命令开启系统 TCP Fast Open：echo 3 > /proc/sys/net/ipv4/tcp_fastopen"
+            log_info "正在尝试自动开启系统 TCP Fast Open..."
+            echo 3 > /proc/sys/net/ipv4/tcp_fastopen
+            if !  grep -q "net.ipv4.tcp_fastopen" /etc/sysctl.conf; then
+                echo "net.ipv4.tcp_fastopen = 3" >> /etc/sysctl.conf
+                log_info "已将 TFO 参数写入 /etc/sysctl.conf"
+            fi
         fi
     else
         tfo=false
@@ -547,36 +730,18 @@ Set_method() {
     echo -e " ${Green_font_prefix}11.${Font_color_suffix} rc4-md5"
     echo -e " ${Green_font_prefix}12.${Font_color_suffix} chacha20-ietf"
     echo "=================================="
-    echo -e "${Tip} AEAD 2022 加密（须v1.15.0及以上版本且密码须经过Base64加密）"
+    log_tip "AEAD 2022 加密（须v1.15.0及以上版本且密码须经过Base64加密）"
     echo "=================================="
     echo -e " ${Green_font_prefix}13.${Font_color_suffix} 2022-blake3-aes-128-gcm ${Green_font_prefix}(推荐)${Font_color_suffix}"
-    echo -e " ${Green_font_prefix}14.${Font_color_suffix} 2022-blake3-aes-256-gcm ${Green_font_prefix}(默认推荐)${Font_color_suffix}"
+    echo -e " ${Green_font_prefix}14. ${Font_color_suffix} 2022-blake3-aes-256-gcm ${Green_font_prefix}(默认推荐)${Font_color_suffix}"
     echo -e " ${Green_font_prefix}15.${Font_color_suffix} 2022-blake3-chacha20-poly1305"
     echo -e " ${Green_font_prefix}16.${Font_color_suffix} 2022-blake3-chacha8-poly1305"
     echo "=================================="
     
-    read -e -p "(默认: 14. 2022-blake3-aes-256-gcm): " method_choice
+    read -e -p "(默认: 14.  2022-blake3-aes-256-gcm): " method_choice
     [[ -z "${method_choice}" ]] && method_choice="14"
     
-    case ${method_choice} in
-        1) cipher="aes-128-gcm" ;;
-        2) cipher="aes-256-gcm" ;;
-        3) cipher="chacha20-ietf-poly1305" ;;
-        4) cipher="plain" ;;
-        5) cipher="none" ;;
-        6) cipher="table" ;;
-        7) cipher="aes-128-cfb" ;;
-        8) cipher="aes-256-cfb" ;;
-        9) cipher="aes-256-ctr" ;;
-        10) cipher="camellia-256-cfb" ;;
-        11) cipher="rc4-md5" ;;
-        12) cipher="chacha20-ietf" ;;
-        13) cipher="2022-blake3-aes-128-gcm" ;;
-        14) cipher="2022-blake3-aes-256-gcm" ;;
-        15) cipher="2022-blake3-chacha20-poly1305" ;;
-        16) cipher="2022-blake3-chacha8-poly1305" ;;
-        *) cipher="2022-blake3-aes-256-gcm" ;;
-    esac
+    cipher="${CIPHERS[$method_choice]:-2022-blake3-aes-256-gcm}"
     
     echo && echo "=================================="
     echo -e "加密: ${Red_background_prefix} ${cipher} ${Font_color_suffix}"
@@ -589,38 +754,34 @@ Set_password() {
     read -e -p "(回车随机生成): " password
     
     if [[ -z "${password}" ]]; then
-        # 根据加密方式选择合适的密钥长度
         case "${cipher}" in
             "2022-blake3-aes-128-gcm")
-                # 生成16字节密钥并进行base64编码
                 password=$(openssl rand -base64 16)
                 ;;
             "2022-blake3-aes-256-gcm"|"2022-blake3-chacha20-poly1305"|"2022-blake3-chacha8-poly1305")
-                # 生成32字节密钥并进行base64编码 (对应44字符的base64编码)
                 password=$(openssl rand -base64 32)
-                # 确保base64编码后的长度正确
-                while [[ ${#password} -ne 44 ]]; do
+                local retry_count=0
+                while [[ ${#password} -ne 44 && $retry_count -lt 10 ]]; do
                     password=$(openssl rand -base64 32)
+                    ((retry_count++))
                 done
                 ;;
             *)
-                # 其他加密方式使用16字节密钥
                 password=$(openssl rand -base64 16)
                 ;;
         esac
-        echo -e "${Info} 已随机生成密码"
+        log_info "已随机生成密码"
     fi
     
-    # 验证密码长度对于2022系列加密方式，但不显示详细信息
     if [[ "${cipher}" =~ "2022-blake3" ]]; then
-        # 解码base64并检查字节长度
         local required_bytes=32
         [[ "${cipher}" == "2022-blake3-aes-128-gcm" ]] && required_bytes=16
         
-        local decoded_length=$(echo -n "${password}" | base64 -d 2>/dev/null | wc -c)
+        local decoded_length
+        decoded_length=$(echo -n "${password}" | base64 -d 2>/dev/null | wc -c)
         
         if [[ ${decoded_length} -ne ${required_bytes} ]]; then
-            echo -e "${Error} 密码长度不符合要求，请重新设置密码！"
+            log_error "密码长度不符合要求，请重新设置密码！"
             Set_password
             return
         fi
@@ -634,7 +795,7 @@ Set_password() {
 # 设置ECN
 Set_ecn(){
     echo -e "是否开启 ECN (Explicit Congestion Notification)？"
-    echo -e "${Tip} 少数客户端（如Surge等）支持此选项"
+    log_tip "少数客户端（如Surge等）支持此选项"
     echo "=================================="
     echo -e " ${Green_font_prefix}1.${Font_color_suffix} 启用"
     echo -e " ${Green_font_prefix}2.${Font_color_suffix} 禁用 (默认)"
@@ -670,9 +831,8 @@ Set_dns(){
         read -e -p "(默认: 8.8.8.8): " dns
         [[ -z "${dns}" ]] && dns="8.8.8.8"
         
-        # 验证DNS格式
-        if ! echo "$dns" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}(,([0-9]{1,3}\.){3}[0-9]{1,3})*$'; then
-            echo -e "${Error} DNS地址格式不正确，请输入正确的IP地址格式!"
+        if !  echo "$dns" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}(,([0-9]{1,3}\.){3}[0-9]{1,3})*$'; then
+            log_error "DNS地址格式不正确，请输入正确的IP地址格式!"
             Set_dns
             return
         fi
@@ -700,65 +860,47 @@ Set(){
     echo -e " ${Green_font_prefix}5.${Font_color_suffix} 修改 DNS 配置"
     echo -e " ${Green_font_prefix}6.${Font_color_suffix} 修改 ECN 配置"
     echo "=================================="
-    echo -e " ${Green_font_prefix}7.${Font_color_suffix} 修改 全部配置" 
+    echo -e " ${Green_font_prefix}7.${Font_color_suffix} 修改 全部配置"
     echo "=================================="
     
     read -e -p "(回车取消): " modify
     [[ -z "${modify}" ]] && echo "已取消..." && exit 1
     
-    # 备份当前配置到临时文件
-    \cp "${CONF}" "/tmp/config.json" 
+    backup_config
     
-    if [[ "${modify}" == "1" ]]; then
-        Read_config
-        Set_port
-        Write_config
-        Restart
-    elif [[ "${modify}" == "2" ]]; then
-        Read_config
-        Set_method
-        Set_password  # 更改加密方式后需要重新设置密码
-        Write_config
-        Restart
-    elif [[ "${modify}" == "3" ]]; then
-        Read_config
-        Set_password
-        Write_config
-        Restart
-    elif [[ "${modify}" == "4" ]]; then
-        Read_config
-        Set_tfo
-        Write_config
-        Restart
-    elif [[ "${modify}" == "5" ]]; then
-        Read_config
-        Set_dns
-        Write_config
-        Restart
-    elif [[ "${modify}" == "6" ]]; then
-        Read_config
-        Set_ecn
-        Write_config
-        Restart
-    elif [[ "${modify}" == "7" ]]; then
-        Read_config
-        Set_port
-        Set_method
-        Set_password
-        Set_tfo
-        Set_dns
-        Set_ecn
-        Write_config
-        Restart
-    else
-        echo -e "${Error} 请输入正确的数字 [1-7]" && exit 1
-    fi
+    case "${modify}" in
+        1)
+            Read_config && Set_port && Write_config && Restart
+            ;;
+        2)
+            Read_config && Set_method && Set_password && Write_config && Restart
+            ;;
+        3)
+            Read_config && Set_password && Write_config && Restart
+            ;;
+        4)
+            Read_config && Set_tfo && Write_config && Restart
+            ;;
+        5)
+            Read_config && Set_dns && Write_config && Restart
+            ;;
+        6)
+            Read_config && Set_ecn && Write_config && Restart
+            ;;
+        7)
+            Read_config && Set_port && Set_method && Set_password && Set_tfo && Set_dns && Set_ecn && Write_config && Restart
+            ;;
+        *)
+            log_error "请输入正确的数字 [1-7]"
+            exit 1
+            ;;
+    esac
 }
 
 # 安装
 Install(){
     if [[ -e ${FILE} ]]; then
-        echo -e "${Error} 检测到 Shadowsocks Rust 已安装！" 
+        log_error "检测到 Shadowsocks Rust 已安装！"
         Before_Start_Menu
         return
     fi
@@ -767,67 +909,78 @@ Install(){
     echo -e "${Green_font_prefix}开始 Shadowsocks Rust 安装...${Font_color_suffix}"
     echo -e "${Yellow_font_prefix}===============================================${Font_color_suffix}\n"
     
-    # 创建备份目录
-    if [[ ! -d "${FOLDER}" ]]; then
-        mkdir -p "${FOLDER}"
-    fi
+    write_log "INFO" "开始安装 Shadowsocks Rust"
     
-    echo -e "${Info} 开始设置配置..."
+    mkdir -p "${FOLDER}"
+    mkdir -p "${BACKUP_DIR}"
+    
+    log_info "开始设置配置..."
     Set_port
     Set_method
     Set_password
     Set_tfo
     Set_dns
     Set_ecn
-    echo -e "${Info} 开始安装/配置依赖..."
-    Installation_dependency
-    echo -e "${Info} 开始下载/安装..."
-    check_new_ver
-    Download || { echo -e "${Error} 下载或解压失败，退出安装！"; exit 1; }
-    echo -e "${Info} 开始安装系统服务脚本..."
-    Service
-    echo -e "${Info} 开始写入配置文件..."
-    Write_config
-    echo -e "${Info} 所有步骤安装完毕，开始启动..."
     
-    # 启动服务
+    log_info "开始安装/配置依赖..."
+    Installation_dependency
+    
+    log_info "开始下载/安装..."
+    check_new_ver
+    if !  Download; then
+        log_error "下载或解压失败，退出安装！"
+        exit 1
+    fi
+    
+    log_info "开始安装系统服务脚本..."
+    Service
+    
+    log_info "开始配置防火墙..."
+    Config_Firewall "${port}"
+    
+    log_info "开始写入配置文件..."
+    Write_config
+    
+    log_info "所有步骤安装完毕，开始启动..."
     Start
     
     # 设置每日重启
-    echo -e "${Info} 正在设置每日5:00自动重启..."
-    RESTART_HOUR="5"
-    RESTART_MINUTE="0"
-    JOB_LINE="${RESTART_MINUTE} ${RESTART_HOUR} * * * /usr/bin/systemctl restart ss-rust"
+    log_info "正在设置每日5:00自动重启..."
+    local RESTART_HOUR="5"
+    local RESTART_MINUTE="0"
+    local JOB_LINE="${RESTART_MINUTE} ${RESTART_HOUR} * * * /usr/bin/systemctl restart ss-rust"
+    local CRONTAB_CONTENT
     CRONTAB_CONTENT=$(crontab -l 2>/dev/null)
     
     if echo "${CRONTAB_CONTENT}" | grep -q "${JOB_LINE}"; then
-        echo -e "${Info} 已存在每日 ${RESTART_HOUR}:${RESTART_MINUTE} 重启 Shadowsocks-Rust 的任务，无需重复添加"
+        log_info "已存在每日 ${RESTART_HOUR}:${RESTART_MINUTE} 重启 Shadowsocks-Rust 的任务，无需重复添加"
     else
         (echo "${CRONTAB_CONTENT}"; echo "${JOB_LINE}") | crontab -
-        echo -e "${Info} 已添加每日 ${RESTART_HOUR}:${RESTART_MINUTE} 重启 Shadowsocks-Rust 的计划任务"
+        log_info "已添加每日 ${RESTART_HOUR}:${RESTART_MINUTE} 重启 Shadowsocks-Rust 的计划任务"
     fi
     
-    echo -e "${Info} 启动完成！"
+    write_log "INFO" "安装完成，端口: $port, 加密: $cipher"
+    log_info "启动完成！"
     
     echo -e "\n${Yellow_font_prefix}===============================================${Font_color_suffix}"
-    echo -e "${Green_font_prefix}Shadowsocks Rust 已成功安装!${Font_color_suffix}"
+    echo -e "${Green_font_prefix}Shadowsocks Rust 已成功安装! ${Font_color_suffix}"
     echo -e "${Yellow_font_prefix}===============================================${Font_color_suffix}"
-    echo -e "\n${Cyan_font_prefix}是否需要继续安装 ShadowTLS 进行流量混淆? [Y/n]${Font_color_suffix}"
+    echo -e "\n${Cyan_font_prefix}是否需要继续安装 ShadowTLS 进行流量混淆?  [Y/n]${Font_color_suffix}"
     
     read -r install_stls
     case "$install_stls" in
         [yY][eE][sS]|[yY]|"")
-            echo -e "${Green_font_prefix}正在准备安装 ShadowTLS...${Font_color_suffix}"
+            echo -e "${Green_font_prefix}正在准备安装 ShadowTLS... ${Font_color_suffix}"
             install_shadowtls
             ;;
         *)
             echo -e "${Yellow_font_prefix}已跳过 ShadowTLS 安装，如需安装请稍后在菜单中选择安装选项${Font_color_suffix}"
-            echo -e "${Info} 显示当前配置信息..."
+            log_info "显示当前配置信息..."
             View
             ;;
     esac
     
-    echo -e "\n${Green_font_prefix}安装过程已完成!${Font_color_suffix}"
+    echo -e "\n${Green_font_prefix}安装过程已完成! ${Font_color_suffix}"
     sleep 1s
     Before_Start_Menu
 }
@@ -838,18 +991,17 @@ Start(){
     check_status
     
     if [[ "$status" == "running" ]]; then
-        echo -e "${Info} Shadowsocks Rust 已在运行！"
+        log_info "Shadowsocks Rust 已在运行！"
     else
-        echo -e "${Info} 启动 Shadowsocks Rust 服务..."
-        systemctl start ss-rust
-        sleep 1s
+        log_info "启动 Shadowsocks Rust 服务..."
         
-        check_status
-        if [[ "$status" == "running" ]]; then
-            echo -e "${Info} Shadowsocks Rust 启动${Green_font_prefix}成功${Font_color_suffix}！"
+        if ensure_service_running ss-rust start; then
+            log_info "Shadowsocks Rust 启动${Green_font_prefix}成功${Font_color_suffix}！"
+            write_log "INFO" "服务启动成功"
         else
-            echo -e "${Error} Shadowsocks Rust 启动${Red_font_prefix}失败${Font_color_suffix}！"
-            echo -e "${Info} 可能是配置错误导致，请检查配置文件或日志: journalctl -u ss-rust"
+            log_error "Shadowsocks Rust 启动${Red_font_prefix}失败${Font_color_suffix}！"
+            log_info "可能是配置错误导致，请检查配置文件或日志: journalctl -u ss-rust"
+            write_log "ERROR" "服务启动失败"
             exit 1
         fi
     fi
@@ -861,19 +1013,18 @@ Stop(){
     check_status
     
     if [[ "$status" != "running" ]]; then
-        echo -e "${Error} Shadowsocks Rust 未在运行，无需停止！" 
+        log_error "Shadowsocks Rust 未在运行，无需停止！"
         exit 1
     fi
     
-    echo -e "${Info} 正在停止 Shadowsocks Rust 服务..."
-    systemctl stop ss-rust
-    sleep 1s
+    log_info "正在停止 Shadowsocks Rust 服务..."
     
-    check_status
-    if [[ "$status" != "running" ]]; then
-        echo -e "${Info} Shadowsocks Rust 已停止运行！"
+    if ensure_service_running ss-rust stop; then
+        log_info "Shadowsocks Rust 已停止运行！"
+        write_log "INFO" "服务已停止"
     else
-        echo -e "${Error} Shadowsocks Rust 停止失败，请检查日志: journalctl -u ss-rust"
+        log_error "Shadowsocks Rust 停止失败，请检查日志: journalctl -u ss-rust"
+        write_log "ERROR" "服务停止失败"
         exit 1
     fi
     Start_Menu
@@ -882,16 +1033,15 @@ Stop(){
 # 重启
 Restart(){
     check_installed_status
-    echo -e "${Info} 正在重启 Shadowsocks Rust 服务..."
-    systemctl restart ss-rust
-    sleep 1s
+    log_info "正在重启 Shadowsocks Rust 服务..."
     
-    check_status
-    if [[ "$status" == "running" ]]; then
-        echo -e "${Info} Shadowsocks Rust 重启${Green_font_prefix}成功${Font_color_suffix}！"
+    if ensure_service_running ss-rust restart; then
+        log_info "Shadowsocks Rust 重启${Green_font_prefix}成功${Font_color_suffix}！"
+        write_log "INFO" "服务重启成功"
     else
-        echo -e "${Error} Shadowsocks Rust 重启${Red_font_prefix}失败${Font_color_suffix}！"
-        echo -e "${Info} 可能是配置错误导致，请检查配置文件或日志: journalctl -u ss-rust"
+        log_error "Shadowsocks Rust 重启${Red_font_prefix}失败${Font_color_suffix}！"
+        log_info "可能是配置错误导致，请检查配置文件或日志: journalctl -u ss-rust"
+        write_log "ERROR" "服务重启失败"
     fi
     sleep 1s
     Start_Menu
@@ -900,86 +1050,63 @@ Restart(){
 # 更新
 Update(){
     check_installed_status
-
-    # 获取当前版本
-    current_ver=$(get_current_version)
-    echo -e "${Info} 当前版本: [ ${current_ver} ]"
-    
-    # 获取最新版本
     check_new_ver
-    
-    # 比较版本
-    if version_compare "${current_ver}" "${new_ver}"; then
-        echo -e "${Info} 发现新版本 [ ${new_ver} ]"
-        echo -e "${Info} 是否更新？[Y/n]"
-        read -p "(默认: y)：" yn
-        [[ -z "${yn}" ]] && yn="y"
-        if [[ ${yn} == [Yy] ]]; then
-            echo -e "${Info} 开始更新 Shadowsocks Rust..."
-            detect_arch
-            download_ss "${new_ver#v}" "${OS_ARCH}"
-            systemctl restart ss-rust
-            echo -e "${Success} Shadowsocks Rust 已更新到最新版本 [ ${new_ver} ]"
-        else
-            echo -e "${Info} 已取消更新"
-        fi
-    else
-        echo -e "${Info} 当前已是最新版本 [ ${new_ver} ]，无需更新"
-    fi
-
-    sleep 2s
+    check_ver_comparison
+    log_info "Shadowsocks Rust 更新完毕！"
+    sleep 1s
     Start_Menu
 }
 
 # 卸载
 Uninstall(){
     check_installed_status
-    echo "确定要卸载 Shadowsocks Rust ? (Y/N)"
-    read -e -p "(回车确认卸载): " unyn
-    [[ -z ${unyn} ]] && unyn="y"
     
-    if [[ ${unyn} == [Yy] ]]; then
-        check_status
-        [[ "$status" == "running" ]] && systemctl stop ss-rust
-        systemctl disable ss-rust
-        
-        # 直接删除所有文件，不提示是否保留配置
-        rm -rf "${FOLDER}"
-        rm -f "${FILE}" "/etc/systemd/system/ss-rust.service"
-        
-        systemctl daemon-reload
-        
-        # 删除定时重启任务
-        echo -e "${Info} 正在检查并删除定时重启任务..."
-        crontab_content=$(crontab -l 2>/dev/null)
-        if echo "${crontab_content}" | grep -q "systemctl restart ss-rust"; then
-            # 删除包含ss-rust重启的行
-            echo "${crontab_content}" | grep -v "systemctl restart ss-rust" | crontab -
-            echo -e "${Info} 已删除 Shadowsocks Rust 的定时重启任务"
-        fi
-        
-        echo -e "${Info} Shadowsocks Rust 卸载完成！"
-        
-        # 检查ShadowTLS是否安装
-        if [ -f "/usr/local/bin/shadow-tls" ] && systemctl is-enabled shadowtls &>/dev/null; then
-            echo -e "\n${Yellow_font_prefix}===============================================${Font_color_suffix}"
-            echo -e "${Cyan_font_prefix}检测到系统中已安装 ShadowTLS，是否需要一并卸载? [Y/n]${Font_color_suffix}"
-            read -r uninstall_stls
-            case "$uninstall_stls" in
-                [yY][eE][sS]|[yY]|"")
-                    echo -e "${Yellow_font_prefix}===============================================${Font_color_suffix}"
-                    uninstall_shadowtls
-                    ;;
-                *)
-                    echo -e "${Yellow_font_prefix}已跳过 ShadowTLS 卸载。${Font_color_suffix}"
-                    ;;
-            esac
-        else
-            echo -e "\n${Yellow_font_prefix}系统中未检测到 ShadowTLS 安装，跳过卸载步骤。${Font_color_suffix}"
-        fi
-    else
+    if !  confirm "确定要卸载 Shadowsocks Rust ?" "y"; then
         echo && echo "卸载已取消..." && echo
+        sleep 2s
+        Start_Menu
+        return
     fi
+    
+    write_log "INFO" "开始卸载 Shadowsocks Rust"
+    
+    check_status
+    [[ "$status" == "running" ]] && systemctl stop ss-rust
+    systemctl disable ss-rust
+    
+    rm -rf "${FOLDER}"
+    rm -f "${FILE}" "/etc/systemd/system/ss-rust.service"
+    
+    systemctl daemon-reload
+    
+    log_info "正在检查并删除定时重启任务..."
+    local crontab_content
+    crontab_content=$(crontab -l 2>/dev/null)
+    if echo "${crontab_content}" | grep -q "systemctl restart ss-rust"; then
+        echo "${crontab_content}" | grep -v "systemctl restart ss-rust" | crontab -
+        log_info "已删除 Shadowsocks Rust 的定时重启任务"
+    fi
+    
+    write_log "INFO" "Shadowsocks Rust 卸载完成"
+    log_info "Shadowsocks Rust 卸载完成！"
+    
+    if [[ -f "/usr/local/bin/shadow-tls" ]] && systemctl is-enabled shadowtls &>/dev/null; then
+        echo -e "\n${Yellow_font_prefix}===============================================${Font_color_suffix}"
+        echo -e "${Cyan_font_prefix}检测到系统中已安装 ShadowTLS，是否需要一并卸载?  [Y/n]${Font_color_suffix}"
+        read -r uninstall_stls
+        case "$uninstall_stls" in
+            [yY][eE][sS]|[yY]|"")
+                echo -e "${Yellow_font_prefix}===============================================${Font_color_suffix}"
+                uninstall_shadowtls
+                ;;
+            *)
+                echo -e "${Yellow_font_prefix}已跳过 ShadowTLS 卸载。${Font_color_suffix}"
+                ;;
+        esac
+    else
+        echo -e "\n${Yellow_font_prefix}系统中未检测到 ShadowTLS 安装，跳过卸载步骤。${Font_color_suffix}"
+    fi
+    
     sleep 2s
     Start_Menu
 }
@@ -988,35 +1115,28 @@ Uninstall(){
 uninstall_shadowtls() {
     echo -e "${Cyan_font_prefix}正在卸载 ShadowTLS...${Font_color_suffix}"
     
-    read -rp "确认要卸载 ShadowTLS? (y/回车确认，其他键取消): " confirm
-    
-    if [[ "${confirm,,}" =~ ^y(es)?$ || -z "$confirm" ]]; then
-        echo -e "${Green_font_prefix}开始卸载...${Font_color_suffix}"
-    else
+    if !  confirm "确认要卸载 ShadowTLS?" "y"; then
         echo -e "${Yellow_font_prefix}已取消卸载操作${Font_color_suffix}"
         return 0
     fi
     
-    # 停止并禁用服务
+    echo -e "${Green_font_prefix}开始卸载... ${Font_color_suffix}"
+    
     echo -e "${Cyan_font_prefix}停止并移除服务...${Font_color_suffix}"
     systemctl stop shadowtls &>/dev/null
     systemctl disable shadowtls &>/dev/null
     
-    # 删除服务文件
     rm -f "/etc/systemd/system/shadowtls.service"
     
-    # 删除二进制文件
     echo -e "${Cyan_font_prefix}删除 ShadowTLS 程序文件...${Font_color_suffix}"
     rm -f "/usr/local/bin/shadow-tls"
     
-    # 删除配置目录（不提示是否备份）
     echo -e "${Cyan_font_prefix}删除配置文件...${Font_color_suffix}"
-    if [ -d "/etc/shadowtls" ]; then
+    if [[ -d "/etc/shadowtls" ]]; then
         rm -rf "/etc/shadowtls"
         echo -e "${Green_font_prefix}已删除配置目录${Font_color_suffix}"
     fi
     
-    # 删除定时重启任务
     echo -e "${Cyan_font_prefix}检查并删除定时重启任务...${Font_color_suffix}"
     if crontab -l 2>/dev/null | grep -q "systemctl restart shadowtls"; then
         crontab -l 2>/dev/null | grep -v "systemctl restart shadowtls" | crontab -
@@ -1027,46 +1147,74 @@ uninstall_shadowtls() {
     echo -e "${Green_font_prefix}ShadowTLS 已成功卸载${Font_color_suffix}"
 }
 
+# 获取IPv4地址
 getipv4(){
-	ipv4=$(wget -qO- -4 -t1 -T2 ipinfo.io/ip)
-	if [[ -z "${ipv4}" ]]; then
-		ipv4=$(wget -qO- -4 -t1 -T2 api.ip.sb/ip)
-		if [[ -z "${ipv4}" ]]; then
-			ipv4=$(wget -qO- -4 -t1 -T2 members.3322.org/dyndns/getip)
-			if [[ -z "${ipv4}" ]]; then
-				ipv4="IPv4_Error"
-			fi
-		fi
-	fi
+    log_info "正在获取公网IPv4地址..."
+    local success=false
+    local ip_services=("api.ipify.org" "ifconfig.me" "ip.sb")
+    
+    for ip_service in "${ip_services[@]}"; do
+        echo -e "  尝试从 ${ip_service} 获取..."
+        ipv4=$(curl -s4 --connect-timeout 3 "https://${ip_service}" 2>/dev/null)
+        
+        if [[ -n "${ipv4}" && "${ipv4}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo -e "  ${Green_font_prefix}成功${Font_color_suffix} 获取到IPv4地址: ${ipv4}"
+            success=true
+            break
+        else
+            echo -e "  ${Yellow_font_prefix}失败${Font_color_suffix} 无法从 ${ip_service} 获取有效IPv4地址"
+        fi
+    done
+    
+    if [[ "$success" != "true" ]]; then
+        log_error "所有IPv4地址获取服务均失败"
+        ipv4="IPv4_Error"
+    fi
 }
 
+# 获取IPv6地址
 getipv6(){
-	ipv6=$(wget -qO- -6 -t1 -T2 ifconfig.co)
-	if [[ -z "${ipv6}" ]]; then
-		ipv6="IPv6_Error"
-	fi
+    log_info "正在获取公网IPv6地址..."
+    local success=false
+    local ip_services=("api64.ipify.org" "ifconfig.co" "ipv6. icanhazip.com")
+    
+    for ip_service in "${ip_services[@]}"; do
+        echo -e "  尝试从 ${ip_service} 获取..."
+        ipv6=$(curl -s6 --connect-timeout 3 "https://${ip_service}" 2>/dev/null)
+        
+        if [[ -n "${ipv6}" ]]; then
+            echo -e "  ${Green_font_prefix}成功${Font_color_suffix} 获取到IPv6地址: ${ipv6}"
+            success=true
+            break
+        else
+            echo -e "  ${Yellow_font_prefix}失败${Font_color_suffix} 无法从 ${ip_service} 获取有效IPv6地址"
+        fi
+    done
+    
+    if [[ "$success" != "true" ]]; then
+        log_warning "所有IPv6地址获取服务均失败，您的服务器可能不支持IPv6"
+        ipv6="IPv6_Error"
+    fi
 }
 
 # Base64编码 (URL安全)
 urlsafe_base64(){
-    date=$(echo -n "$1"|base64|sed ':a;N;s/\n/ /g;ta'|sed 's/ //g;s/=//g;s/+/-/g;s/\//_/g')
-    echo -e "${date}"
+    local data
+    data=$(echo -n "$1" | base64 | sed ':a;N;s/\n/ /g;ta' | sed 's/ //g;s/=//g;s/+/-/g;s/\//_/g')
+    echo -e "${data}"
 }
 
 # 查看配置
 View(){
     check_installed_status
-    Read_config
     
-    # 获取公网IP地址
+    if !  Read_config; then
+        Before_Start_Menu
+        return
+    fi
+    
     getipv4
     getipv6
-
-    # 新增：如果 IPv4 和 IPv6 都获取失败，直接报错退出
-    if [[ "${ipv4}" == "IPv4_Error" && "${ipv6}" == "IPv6_Error" ]]; then
-        echo -e "${Error} 无法获取 IPv4 或 IPv6 地址，无法输出配置信息！"
-        return 1
-    fi
     
     echo -e "\n${Yellow_font_prefix}=== Shadowsocks Rust 配置 ===${Font_color_suffix}"
     [[ "${ipv4}" != "IPv4_Error" ]] && echo -e " IPv4 地址：${Green_font_prefix}${ipv4}${Font_color_suffix}"
@@ -1083,27 +1231,22 @@ View(){
     fi
     echo -e "——————————————————————————————————"
 
-    # 生成 SS 链接
-    local userinfo=$(echo -n "${cipher}:${password}" | tr -d '\n')
+    local userinfo
+    userinfo=$(echo -n "${cipher}:${password}" | base64 | tr -d '\n')
     local ss_url_ipv4=""
     local ss_url_ipv6=""
     
-    if [[ "${ipv4}" != "IPv4_Error" ]]; then
-        ss_url_ipv4="ss://${userinfo}@${ipv4}:${port}#ss-${ipv4}"
-    fi
-    if [[ "${ipv6}" != "IPv6_Error" ]]; then
-        ss_url_ipv6="ss://${userinfo}@${ipv6}:${port}#ss-${ipv6}"
-    fi
+    [[ "${ipv4}" != "IPv4_Error" ]] && ss_url_ipv4="ss://${userinfo}@${ipv4}:${port}#ss-${ipv4}"
+    [[ "${ipv6}" != "IPv6_Error" ]] && ss_url_ipv6="ss://${userinfo}@${ipv6}:${port}#ss-${ipv6}"
 
-    # 检查 ShadowTLS 是否安装并获取配置
     local stls_listen_port=""
     local stls_password=""
     local stls_sni=""
     
-    if [ -f "/etc/systemd/system/shadowtls.service" ]; then
+    if [[ -f "/etc/systemd/system/shadowtls. service" ]]; then
         stls_listen_port=$(grep -oP '(?<=--listen \[\:\:\]\:)\d+' /etc/systemd/system/shadowtls.service 2>/dev/null)
         stls_password=$(grep -oP '(?<=--password )\S+' /etc/systemd/system/shadowtls.service 2>/dev/null)
-        stls_sni=$(grep -oP '(?<=--tls )[^:]+(?=:443\b)' /etc/systemd/system/shadowtls.service 2>/dev/null)
+        stls_sni=$(grep -oP '(?<=--tls )[^:]+(? =:443\b)' /etc/systemd/system/shadowtls.service 2>/dev/null)
 
         echo -e "\n${Yellow_font_prefix}=== ShadowTLS 配置 ===${Font_color_suffix}"
         echo -e " 监听端口：${Green_font_prefix}${stls_listen_port}${Font_color_suffix}"
@@ -1112,11 +1255,10 @@ View(){
     fi
 
     echo -e "\n${Yellow_font_prefix}=== Shadowsocks 链接 ===${Font_color_suffix}"
-    [[ ! -z "${ss_url_ipv4}" ]] && echo -e "${Green_font_prefix}IPv4 链接：${Font_color_suffix}${ss_url_ipv4}"
-    [[ ! -z "${ss_url_ipv6}" ]] && echo -e "${Green_font_prefix}IPv6 链接：${Font_color_suffix}${ss_url_ipv6}"
+    [[ -n "${ss_url_ipv4}" ]] && echo -e "${Green_font_prefix}IPv4 链接：${Font_color_suffix}${ss_url_ipv4}"
+    [[ -n "${ss_url_ipv6}" ]] && echo -e "${Green_font_prefix}IPv6 链接：${Font_color_suffix}${ss_url_ipv6}"
 
     echo -e "\n${Yellow_font_prefix}=== Surge 配置 ===${Font_color_suffix}"
-    # 显示IPv4配置
     if [[ "${ipv4}" != "IPv4_Error" ]]; then
         if [[ "${ecn}" == "true" ]]; then
             echo -e "ss-${ipv4} = ss, ${ipv4}, ${port}, encrypt-method=${cipher}, password=${password}, tfo=${tfo}, udp-relay=true, ecn=true"
@@ -1125,7 +1267,6 @@ View(){
         fi
     fi
     
-    # 显示IPv6配置
     if [[ "${ipv6}" != "IPv6_Error" ]]; then
         if [[ "${ecn}" == "true" ]]; then
             echo -e "ss-${ipv6} = ss, ${ipv6}, ${port}, encrypt-method=${cipher}, password=${password}, tfo=${tfo}, udp-relay=true, ecn=true"
@@ -1134,17 +1275,15 @@ View(){
         fi
     fi
     
-    # 如果两种IP地址都无效，显示错误
     if [[ "${ipv4}" == "IPv4_Error" && "${ipv6}" == "IPv6_Error" ]]; then
-        echo -e "${Error} 无法获取服务器IP地址，无法生成Surge配置"
+        log_error "无法获取服务器IP地址，无法生成Surge配置"
     fi
 
-    # 检查 ShadowTLS 是否安装并生成配置
-    if [ -f "/etc/systemd/system/shadowtls.service" ]; then
-        # 生成 SS + ShadowTLS 合并链接
+    if [[ -f "/etc/systemd/system/shadowtls.service" ]]; then
         local shadow_tls_config="{\"version\":\"3\",\"password\":\"${stls_password}\",\"host\":\"${stls_sni}\",\"port\":\"${stls_listen_port}\",\"address\":\"${ipv4}\"}"
-        local shadow_tls_base64=$(echo -n "${shadow_tls_config}" | tr -d '\n')
-        local ss_stls_url="ss://${userinfo}@${ipv4}:${port}?shadow-tls=${shadow_tls_base64}#ss-${ipv4}"
+        local shadow_tls_base64
+        shadow_tls_base64=$(echo -n "${shadow_tls_config}" | base64 | tr -d '\n')
+        local ss_stls_url="ss://${userinfo}@${ipv4}:${port}? shadow-tls=${shadow_tls_base64}#ss-${ipv4}"
 
         echo -e "\n${Yellow_font_prefix}=== SS + ShadowTLS 链接 ===${Font_color_suffix}"
         echo -e "${Green_font_prefix}合并链接：${Font_color_suffix}${ss_stls_url}"
@@ -1153,11 +1292,10 @@ View(){
         if [[ "${ipv4}" != "IPv4_Error" ]]; then
             echo -e "ss-${ipv4} = ss, ${ipv4}, ${stls_listen_port}, encrypt-method=${cipher}, password=${password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${stls_sni}, shadow-tls-version=3, udp-relay=true, udp-port=${port}"
         else
-            # IPv6版本
             if [[ "${ipv6}" != "IPv6_Error" ]]; then
                 echo -e "ss-${ipv6} = ss, ${ipv6}, ${stls_listen_port}, encrypt-method=${cipher}, password=${password}, shadow-tls-password=${stls_password}, shadow-tls-sni=${stls_sni}, shadow-tls-version=3, udp-relay=true, udp-port=${port}"
             else
-                echo -e "${Error} 无法获取服务器IP地址，无法生成Surge+ShadowTLS配置"
+                log_error "无法获取服务器IP地址，无法生成Surge+ShadowTLS配置"
             fi
         fi
     fi
@@ -1172,30 +1310,28 @@ Status(){
     
     echo -e "\n${Yellow_font_prefix}=== Shadowsocks Rust 服务状态 ===${Font_color_suffix}"
     
-    # 显示运行状态
     if [[ "$status" == "running" ]]; then
         echo -e " 运行状态：${Green_font_prefix}正在运行${Font_color_suffix}"
         
-        # 获取进程ID和运行时间
-        local pid=$(systemctl show -p MainPID ss-rust | cut -d= -f2)
+        local pid
+        pid=$(systemctl show -p MainPID ss-rust | cut -d= -f2)
         if [[ "$pid" != "0" ]]; then
             echo -e " 进程 PID：${Green_font_prefix}${pid}${Font_color_suffix}"
             
-            # 获取内存使用
-            local memory_usage=$(ps -o rss= -p $pid 2>/dev/null)
+            local memory_usage
+            memory_usage=$(ps -o rss= -p "$pid" 2>/dev/null)
             if [[ -n "$memory_usage" ]]; then
                 memory_usage=$(awk "BEGIN {printf \"%.2f\", ${memory_usage}/1024}")
                 echo -e " 内存占用：${Green_font_prefix}${memory_usage} MB${Font_color_suffix}"
             fi
             
-            # 获取启动时间
-            local started_at=$(systemctl show ss-rust -p ActiveEnterTimestamp | cut -d= -f2)
+            local started_at
+            started_at=$(systemctl show ss-rust -p ActiveEnterTimestamp | cut -d= -f2)
             if [[ -n "$started_at" ]]; then
                 echo -e " 启动时间：${Green_font_prefix}${started_at}${Font_color_suffix}"
             fi
         fi
         
-        # 检查监听端口
         if command -v netstat &>/dev/null || command -v ss &>/dev/null; then
             echo -e "\n${Yellow_font_prefix}=== 端口监听状态 ===${Font_color_suffix}"
             if command -v ss &>/dev/null; then
@@ -1206,12 +1342,11 @@ Status(){
         fi
     else
         echo -e " 运行状态：${Red_font_prefix}未运行${Font_color_suffix}"
-        echo -e " ${Tip} 使用 ${Green_font_prefix}./ss22.sh${Font_color_suffix} 选择 ${Green_font_prefix}4.${Font_color_suffix} 启动服务"
+        log_tip "使用 ${Green_font_prefix}./ss22. sh${Font_color_suffix} 选择 ${Green_font_prefix}4. ${Font_color_suffix} 启动服务"
     fi
     
-    # 显示日志选项
     echo -e "\n${Yellow_font_prefix}=== 日志查看选项 ===${Font_color_suffix}"
-    echo -e " ${Green_font_prefix}1.${Font_color_suffix} 查看最近 50 行日志"
+    echo -e " ${Green_font_prefix}1. ${Font_color_suffix} 查看最近 50 行日志"
     echo -e " ${Green_font_prefix}2.${Font_color_suffix} 查看今日错误日志"
     echo -e " ${Green_font_prefix}3.${Font_color_suffix} 实时跟踪日志"
     echo -e " ${Green_font_prefix}0.${Font_color_suffix} 返回主菜单"
@@ -1229,12 +1364,11 @@ Status(){
             journalctl -u ss-rust --no-pager --since today | grep -i "error\|fail\|warn"
             ;;
         3)
-            echo -e "${Info} 按 Ctrl+C 退出日志跟踪..."
+            log_info "按 Ctrl+C 退出日志跟踪..."
             sleep 1
             journalctl -u ss-rust -f --no-hostname
             ;;
         0|*)
-            # 不做任何操作，直接返回主菜单
             ;;
     esac
     
@@ -1246,47 +1380,44 @@ Update_Shell(){
     echo -e "当前版本为 [ ${sh_ver} ]，开始检测最新版本..."
     
     local github_url="https://raw.githubusercontent.com/tunecc/ss22-ShadowTLS/main/ss22.sh"
-    sh_new_ver=$(wget --no-check-certificate -qO- "${github_url}"|grep 'sh_ver="'|awk -F "=" '{print $NF}'|sed 's/\"//g'|head -1)
+    local sh_new_ver
+    sh_new_ver=$(wget --no-check-certificate -qO- "${github_url}" | grep 'sh_ver="' | awk -F "=" '{print $NF}' | sed 's/\"//g' | head -1)
     
     if [[ -z ${sh_new_ver} ]]; then
-        echo -e "${Error} 检测最新版本失败！" 
+        log_error "检测最新版本失败！"
         Start_Menu
+        return
     fi
     
-    if [[ ${sh_new_ver} != ${sh_ver} ]]; then
+    if [[ ${sh_new_ver} != "${sh_ver}" ]]; then
         echo -e "发现新版本[ ${sh_new_ver} ]，是否更新？[Y/n]"
         read -p "(默认: y): " yn
         [[ -z "${yn}" ]] && yn="y"
         
         if [[ ${yn} == [Yy] ]]; then
-            echo -e "${Info} 开始下载最新版本脚本..."
-            wget -O ss22.sh --no-check-certificate "${github_url}"
-            
-            if [ $? -ne 0 ]; then
-                echo -e "${Error} 下载失败，请检查网络连接"
+            log_info "开始下载最新版本脚本..."
+            if !  wget -O ss22.sh --no-check-certificate "${github_url}"; then
+                log_error "下载失败，请检查网络连接"
                 sleep 1s
                 Start_Menu
                 return
             fi
             
             chmod +x ss22.sh
-            echo -e "${Info} 脚本已更新为最新版本[ ${sh_new_ver} ]"
-            echo -e "${Info} 3秒后将执行新脚本"
+            log_info "脚本已更新为最新版本[ ${sh_new_ver} ]"
+            log_info "3秒后将执行新脚本"
             sleep 3s
-            bash ss22.sh
+            exec bash ss22.sh
         else
-            echo -e "${Info} 已取消更新"
+            log_info "已取消更新"
             sleep 1s
             Start_Menu
         fi
     else
-        echo -e "${Info} 当前已是最新版本[ ${sh_new_ver} ]"
+        log_info "当前已是最新版本[ ${sh_new_ver} ]"
         sleep 1s
         Start_Menu
     fi
-    
-    sleep 1s
-    bash ss22.sh
 }
 
 # 暂停并按键继续
@@ -1302,8 +1433,8 @@ Set_daily_restart(){
     read -e -p "(默认: 3): " RESTART_HOUR
     [[ -z "${RESTART_HOUR}" ]] && RESTART_HOUR="3"
     
-    if ! [[ "${RESTART_HOUR}" =~ ^[0-9]+$ ]] || [ "${RESTART_HOUR}" -lt 0 ] || [ "${RESTART_HOUR}" -gt 23 ]; then
-        echo -e "${Error} 小时必须是 0-23 之间的整数！"
+    if !  [[ "${RESTART_HOUR}" =~ ^[0-9]+$ ]] || [[ "${RESTART_HOUR}" -lt 0 ]] || [[ "${RESTART_HOUR}" -gt 23 ]]; then
+        log_error "小时必须是 0-23 之间的整数！"
         return
     fi
 
@@ -1311,27 +1442,25 @@ Set_daily_restart(){
     read -e -p "(默认: 0): " RESTART_MINUTE
     [[ -z "${RESTART_MINUTE}" ]] && RESTART_MINUTE="0"
     
-    if ! [[ "${RESTART_MINUTE}" =~ ^[0-9]+$ ]] || [ "${RESTART_MINUTE}" -lt 0 ] || [ "${RESTART_MINUTE}" -gt 59 ]; then
-        echo -e "${Error} 分钟必须是 0-59 之间的整数！"
+    if ! [[ "${RESTART_MINUTE}" =~ ^[0-9]+$ ]] || [[ "${RESTART_MINUTE}" -lt 0 ]] || [[ "${RESTART_MINUTE}" -gt 59 ]]; then
+        log_error "分钟必须是 0-59 之间的整数！"
         return
     fi
 
-    JOB_LINE="${RESTART_MINUTE} ${RESTART_HOUR} * * * /usr/bin/systemctl restart ss-rust"
+    local JOB_LINE="${RESTART_MINUTE} ${RESTART_HOUR} * * * /usr/bin/systemctl restart ss-rust"
+    local CRONTAB_CONTENT
     CRONTAB_CONTENT=$(crontab -l 2>/dev/null)
 
-    # 检查是否已存在相同任务
     if echo "${CRONTAB_CONTENT}" | grep -q "${JOB_LINE}"; then
-        echo -e "${Info} 已存在每日 ${RESTART_HOUR}:${RESTART_MINUTE} 重启 Shadowsocks-Rust 的任务，无需重复添加"
+        log_info "已存在每日 ${RESTART_HOUR}:${RESTART_MINUTE} 重启 Shadowsocks-Rust 的任务，无需重复添加"
     else
-        # 删除任何已存在的ss-rust定时重启任务
         if echo "${CRONTAB_CONTENT}" | grep -q "systemctl restart ss-rust"; then
             CRONTAB_CONTENT=$(echo "${CRONTAB_CONTENT}" | grep -v "systemctl restart ss-rust")
-            echo -e "${Info} 已删除旧的定时重启任务"
+            log_info "已删除旧的定时重启任务"
         fi
         
-        # 添加新任务
         (echo "${CRONTAB_CONTENT}"; echo "${JOB_LINE}") | crontab -
-        echo -e "${Info} 已添加每日 ${RESTART_HOUR}:${RESTART_MINUTE} 重启 Shadowsocks-Rust 的计划任务"
+        log_info "已添加每日 ${RESTART_HOUR}:${RESTART_MINUTE} 重启 Shadowsocks-Rust 的计划任务"
     fi
     
     sleep 1s
@@ -1340,29 +1469,23 @@ Set_daily_restart(){
 
 # 安装ShadowTLS
 install_shadowtls() {
-    echo -e "${Info} 开始下载 ShadowTLS 安装脚本..."
+    log_info "开始下载 ShadowTLS 安装脚本..."
     
-    wget -N --no-check-certificate https://raw.githubusercontent.com/tunecc/ss22-ShadowTLS/main/shadowtls.sh
-    
-    if [ $? -ne 0 ]; then
-        echo -e "${Error} ShadowTLS 脚本下载失败！"
-        read -e -p "是否重试下载？[Y/n]" retry_download
-        [[ -z "${retry_download}" ]] && retry_download="y"
-        
-        if [[ ${retry_download} == [Yy] ]]; then
+    if ! wget -N --no-check-certificate https://raw.githubusercontent.com/tunecc/ss22-ShadowTLS/main/shadowtls.sh; then
+        log_error "ShadowTLS 脚本下载失败！"
+        if confirm "是否重试下载？" "y"; then
             install_shadowtls
             return
         else
-            echo -e "${Warning} ShadowTLS 安装已取消"
+            log_warning "ShadowTLS 安装已取消"
             return 1
         fi
     fi
     
     chmod +x shadowtls.sh
-    echo -e "${Info} 开始安装 ShadowTLS..."
+    log_info "开始安装 ShadowTLS..."
     bash shadowtls.sh
     
-    # 安装完成后清理脚本文件
     rm -f shadowtls.sh
 }
 
@@ -1372,9 +1495,8 @@ Start_Menu(){
     check_root
     check_sys
     sysArch
-    action=$1
     
-    # 检查安装和运行状态
+    local status_text
     if [[ -e ${FILE} ]]; then
         check_status
         if [[ "$status" == "running" ]]; then
@@ -1391,12 +1513,12 @@ Start_Menu(){
     
     echo
     echo -e "${Cyan_font_prefix}◆ 安装管理${Font_color_suffix}"
-    echo -e "  ${Green_font_prefix}1.${Font_color_suffix} 安装 Shadowsocks Rust"
+    echo -e "  ${Green_font_prefix}1. ${Font_color_suffix} 安装 Shadowsocks Rust"
     echo -e "  ${Green_font_prefix}2.${Font_color_suffix} 更新 Shadowsocks Rust"
     echo -e "  ${Green_font_prefix}3.${Font_color_suffix} 卸载 Shadowsocks Rust"
     echo
     echo -e "${Cyan_font_prefix}◆ 服务控制${Font_color_suffix}"
-    echo -e "  ${Green_font_prefix}4.${Font_color_suffix} 启动 Shadowsocks Rust"
+    echo -e "  ${Green_font_prefix}4. ${Font_color_suffix} 启动 Shadowsocks Rust"
     echo -e "  ${Green_font_prefix}5.${Font_color_suffix} 停止 Shadowsocks Rust"
     echo -e "  ${Green_font_prefix}6.${Font_color_suffix} 重启 Shadowsocks Rust"
     echo
@@ -1464,4 +1586,6 @@ Start_Menu(){
             ;;
     esac
 }
+
+# 启动主菜单
 Start_Menu
